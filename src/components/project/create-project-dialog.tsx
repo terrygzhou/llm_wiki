@@ -9,13 +9,13 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { FolderOpen } from "lucide-react"
 import { createProject, writeFile, createDirectory } from "@/commands/fs"
-import { getTemplate } from "@/lib/templates"
+import { getTemplate } from "@/lib/utils/templates"
 import { TemplatePicker } from "@/components/project/template-picker"
 import type { WikiProject } from "@/types/wiki"
-import { normalizePath } from "@/lib/path-utils"
-import { OUTPUT_LANGUAGE_OPTIONS } from "@/lib/output-language-options"
+import { normalizePath } from "@/lib/utils/path-utils"
+import { OUTPUT_LANGUAGE_OPTIONS } from "@/lib/i18n-support/output-language-options"
 import { useWikiStore, type OutputLanguage } from "@/stores/wiki-store"
-import { saveOutputLanguage } from "@/lib/project-store"
+import { saveOutputLanguage } from "@/lib/utils/project-store"
 
 interface CreateProjectDialogProps {
   open: boolean

@@ -25,18 +25,18 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { useChatStore } from "@/stores/chat-store"
 import { useUpdateStore, hasAvailableUpdate } from "@/stores/update-store"
 import { useZoomStore } from "@/stores/zoom-store"
-import { clampUserConcurrency } from "@/lib/concurrency-limits"
+import { clampUserConcurrency } from "@/lib/chat/concurrency-limits"
 import {
   loadSourceWatchAllProjects,
   loadSourceWatchConfig,
   saveLanguage,
   saveTheme,
   loadTheme,
-} from "@/lib/project-store"
-import { applyTheme, type AppTheme } from "@/lib/theme"
+} from "@/lib/utils/project-store"
+import { applyTheme, type AppTheme } from "@/lib/utils/theme"
 import type { SettingsDraft, DraftSetter } from "./settings-types"
-import { normalizeSourceWatchConfig } from "@/lib/source-watch-config"
-import { setIngestWorkerLimit } from "@/lib/ingest-queue"
+import { normalizeSourceWatchConfig } from "@/lib/tauri/source-watch-config"
+import { setIngestWorkerLimit } from "@/lib/ingest/ingest-queue"
 import { LlmProviderSection } from "./sections/llm-provider-section"
 import { EmbeddingSection } from "./sections/embedding-section"
 import { MultimodalSection } from "./sections/multimodal-section"
@@ -378,7 +378,7 @@ export function SettingsView() {
       loadGeneralConfig,
       saveZoomLevel,
       loadZoomLevel,
-    } = await import("@/lib/project-store")
+    } = await import("@/lib/utils/project-store")
 
     const newLlm = {
       provider: draft.provider,
@@ -494,7 +494,7 @@ export function SettingsView() {
           startProjectFileSync,
           stopAllProjectFileSync,
           stopProjectFileSync,
-        } = await import("@/lib/project-file-sync")
+        } = await import("@/lib/tauri/project-file-sync")
         if (newSourceWatch.enabled) {
           await startProjectFileSync(project, newSourceWatch).catch((err) =>
             console.error("Failed to start project file sync:", err)
@@ -520,7 +520,7 @@ export function SettingsView() {
 
       if (project) {
         await saveScheduledImportConfig(project.path, newScheduledImport)
-        const { startScheduledImport } = await import("@/lib/scheduled-import")
+        const { startScheduledImport } = await import("@/lib/utils/scheduled-import")
         // Keep the cross-project scheduler alive even if the current
         // project's own monitor was just disabled.
         startScheduledImport(project, newScheduledImport)

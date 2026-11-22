@@ -10,7 +10,7 @@ import { useAppDialog } from "@/stores/app-dialog-store"
 import { useActivityStore, type ActivityItem } from "@/stores/activity-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useFileSyncStore } from "@/stores/file-sync-store"
-import { normalizePath, getFileName, isAbsolutePath } from "@/lib/path-utils"
+import { normalizePath, getFileName, isAbsolutePath } from "@/lib/utils/path-utils"
 import {
   getQueue,
   getQueueSummary,
@@ -24,14 +24,14 @@ import {
   pauseProcessing,
   resumeProcessing,
   type IngestTask,
-} from "@/lib/ingest-queue"
+} from "@/lib/ingest/ingest-queue"
 import {
   ignoreFileChangeTask,
   rescanProjectFiles,
   retryFileChangeTask,
   type FileChangeTask,
 } from "@/commands/file-sync"
-import { inferWikiTypeFromPath, wikiTypeLabel } from "@/lib/wiki-page-types"
+import { inferWikiTypeFromPath, wikiTypeLabel } from "@/lib/utils/wiki-page-types"
 
 const FILE_TYPE_ICONS: Record<string, typeof FileText> = {
   sources: BookOpen,

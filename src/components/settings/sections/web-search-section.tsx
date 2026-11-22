@@ -11,14 +11,14 @@ import {
   type SearchProvider,
   type SearchProviderOverride,
 } from "@/stores/wiki-store"
-import { normalizeAnyTxtConfig } from "@/lib/anytxt-search"
+import { normalizeAnyTxtConfig } from "@/lib/utils/anytxt-search"
 import {
   SEARXNG_CATEGORY_OPTIONS,
   SERPAPI_ENGINE_OPTIONS,
   resolveSearchConfig,
   DEFAULT_FIRECRAWL_URL,
   webSearch,
-} from "@/lib/web-search"
+} from "@/lib/utils/web-search"
 
 const SEARCH_PROVIDERS = [
   {
@@ -85,7 +85,7 @@ export function WebSearchSection() {
   const testRunRef = useRef<Record<string, number>>({})
 
   async function persist(next: SearchApiConfig) {
-    const { saveSearchApiConfig } = await import("@/lib/project-store")
+    const { saveSearchApiConfig } = await import("@/lib/utils/project-store")
     setSearchApiConfig(next)
     await saveSearchApiConfig(next)
   }

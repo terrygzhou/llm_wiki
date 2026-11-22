@@ -15,16 +15,16 @@ import {
   Tag as TagIcon,
 } from "lucide-react"
 import { openUrl } from "@tauri-apps/plugin-opener"
-import type { FrontmatterValue } from "@/lib/frontmatter"
-import { getWikiTypeStyle } from "@/lib/wiki-type-style"
+import type { FrontmatterValue } from "@/lib/utils/frontmatter"
+import { getWikiTypeStyle } from "@/lib/graph/wiki-type-style"
 import {
   resolveRelatedSlug,
   resolveSourceReference,
   type SourceReferenceResolution,
   unwrapWikilink,
-} from "@/lib/wiki-page-resolver"
+} from "@/lib/utils/wiki-page-resolver"
 import { useWikiStore } from "@/stores/wiki-store"
-import { normalizePath } from "@/lib/path-utils"
+import { normalizePath } from "@/lib/utils/path-utils"
 import { useTranslation } from "react-i18next"
 
 interface FrontmatterPanelProps {

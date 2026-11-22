@@ -18,9 +18,9 @@ import {
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { useWikiStore } from "@/stores/wiki-store"
-import { hasUsableLlm } from "@/lib/has-usable-llm"
-import { runDuplicateDetection } from "@/lib/dedup-runner"
-import { addNotDuplicate } from "@/lib/dedup-storage"
+import { hasUsableLlm } from "@/lib/chat/has-usable-llm"
+import { runDuplicateDetection } from "@/lib/ingest/dedup-runner"
+import { addNotDuplicate } from "@/lib/ingest/dedup-storage"
 import {
   enqueueMerge,
   cancelTask,
@@ -30,9 +30,9 @@ import {
   resumeProcessing,
   groupKey,
   type DedupTask,
-} from "@/lib/dedup-queue"
-import type { DuplicateGroup } from "@/lib/dedup"
-import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
+} from "@/lib/ingest/dedup-queue"
+import type { DuplicateGroup } from "@/lib/ingest/dedup"
+import { refreshProjectFileTree } from "@/lib/tauri/project-file-tree-refresh"
 import {
   clearFileHistory,
   getFileHistorySettings,
@@ -42,7 +42,7 @@ import {
   type FileHistorySettings,
   type FileHistoryStats,
 } from "@/commands/fs"
-import { addToRecentProjects } from "@/lib/project-store"
+import { addToRecentProjects } from "@/lib/utils/project-store"
 
 interface GroupUiEntry {
   group: DuplicateGroup

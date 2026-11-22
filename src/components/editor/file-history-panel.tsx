@@ -2,7 +2,7 @@ import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { Clock3, RotateCcw, X } from "lucide-react"
 import { listFileHistory, restoreFileHistory, type FileHistoryEntry } from "@/commands/fs"
-import { summarizeAgentFileChange } from "@/lib/agent-file-activity"
+import { summarizeAgentFileChange } from "@/lib/utils/agent-file-activity"
 import { useWikiStore } from "@/stores/wiki-store"
 
 export function FileHistoryButton({ filePath, currentContent }: { filePath: string; currentContent: string }) {

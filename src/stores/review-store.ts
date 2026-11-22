@@ -1,5 +1,5 @@
 import { create } from "zustand"
-import { normalizeReviewTitle } from "@/lib/review-utils"
+import { normalizeReviewTitle } from "@/lib/utils/review-utils"
 
 export interface ReviewOption {
   label: string

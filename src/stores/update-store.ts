@@ -1,5 +1,5 @@
 import { create } from "zustand"
-import type { UpdateStatus } from "@/lib/update-check"
+import type { UpdateStatus } from "@/lib/utils/update-check"
 
 /**
  * UI-side state for the update-check feature. Persistence (user-level

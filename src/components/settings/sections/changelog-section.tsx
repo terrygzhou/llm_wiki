@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next"
-import { CHANGELOG } from "@/lib/changelog"
+import { CHANGELOG } from "@/lib/utils/changelog"
 
 export function ChangelogSection() {
   const { t, i18n } = useTranslation()

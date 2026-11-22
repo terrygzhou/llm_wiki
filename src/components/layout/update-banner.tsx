@@ -3,8 +3,8 @@ import { Sparkles, X, Download } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { openUrl } from "@tauri-apps/plugin-opener"
 import { useUpdateStore, shouldShowUpdateBanner } from "@/stores/update-store"
-import { saveUpdateCheckState } from "@/lib/project-store"
-import { toLatestReleaseUrl } from "@/lib/update-check"
+import { saveUpdateCheckState } from "@/lib/utils/project-store"
+import { toLatestReleaseUrl } from "@/lib/utils/update-check"
 
 /**
  * App-wide update-available banner.

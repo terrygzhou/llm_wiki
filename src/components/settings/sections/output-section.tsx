@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next"
 import { Label } from "@/components/ui/label"
 import type { SettingsDraft, DraftSetter } from "../settings-types"
-import { OUTPUT_LANGUAGE_OPTIONS as LANGUAGE_OPTIONS } from "@/lib/output-language-options"
+import { OUTPUT_LANGUAGE_OPTIONS as LANGUAGE_OPTIONS } from "@/lib/i18n-support/output-language-options"
 
 interface Props {
   draft: SettingsDraft

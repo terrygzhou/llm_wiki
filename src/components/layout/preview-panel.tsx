@@ -2,10 +2,10 @@ import { useEffect, useCallback, useRef } from "react"
 import { X } from "lucide-react"
 import { useWikiStore } from "@/stores/wiki-store"
 import { readFile, writeFile } from "@/commands/fs"
-import { getFileCategory, isBinary, isExtractedTextPreviewFile } from "@/lib/file-types"
+import { getFileCategory, isBinary, isExtractedTextPreviewFile } from "@/lib/utils/file-types"
 import { WikiEditor } from "@/components/editor/wiki-editor"
 import { FilePreview } from "@/components/editor/file-preview"
-import { getFileName } from "@/lib/path-utils"
+import { getFileName } from "@/lib/utils/path-utils"
 
 export function PreviewPanel() {
   const selectedFile = useWikiStore((s) => s.selectedFile)

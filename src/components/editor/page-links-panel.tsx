@@ -2,11 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { CornerUpLeft, FileQuestion, Link2, Loader2, Plus, Sparkles, X } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { createMissingWikiPage, getPageLinks, readFile, type PageLinkEntry, type PageLinksResponse } from "@/commands/fs"
-import { normalizePath } from "@/lib/path-utils"
+import { normalizePath } from "@/lib/utils/path-utils"
 import { useWikiStore } from "@/stores/wiki-store"
-import { streamChat } from "@/lib/llm-client"
-import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
-import { normalizeSelectionReplacement } from "@/lib/selection-edit"
+import { streamChat } from "@/lib/chat/llm-client"
+import { refreshProjectFileTree } from "@/lib/tauri/project-file-tree-refresh"
+import { normalizeSelectionReplacement } from "@/lib/utils/selection-edit"
 
 const EMPTY_LINKS: PageLinksResponse = { outgoing: [], backlinks: [], missing: [] }
 

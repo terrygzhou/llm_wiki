@@ -4,7 +4,7 @@
 import { describe, it, expect, beforeEach } from "vitest"
 import fc from "fast-check"
 import { useReviewStore, type ReviewItem } from "./review-store"
-import { normalizeReviewTitle } from "@/lib/review-utils"
+import { normalizeReviewTitle } from "@/lib/utils/review-utils"
 
 beforeEach(() => {
   useReviewStore.setState({ items: [] })

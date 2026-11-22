@@ -5,7 +5,7 @@ import { RefreshCw, Search, Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useChatStore } from "@/stores/chat-store"
 import { useWikiStore } from "@/stores/wiki-store"
-import { saveChatPreferences } from "@/lib/persist"
+import { saveChatPreferences } from "@/lib/tauri/persist"
 
 interface AvailableAgentSkill {
   id: string

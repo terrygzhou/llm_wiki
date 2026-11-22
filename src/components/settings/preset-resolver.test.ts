@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { LLM_PRESETS } from "./llm-presets"
 import { disabledLlmConfig, resolveConfig } from "./preset-resolver"
-import { hasUsableLlm } from "@/lib/has-usable-llm"
+import { hasUsableLlm } from "@/lib/chat/has-usable-llm"
 import type { LlmConfig } from "@/stores/wiki-store"
 import type { LlmPreset } from "./llm-presets"
 

@@ -1,5 +1,5 @@
-import { templates } from "@/lib/templates"
-import { cn } from "@/lib/utils"
+import { templates } from "@/lib/utils/templates"
+import { cn } from "@/lib/utils/utils"
 import { useTranslation } from "react-i18next"
 
 interface TemplatePickerProps {

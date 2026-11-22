@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core"
 import type { FileNode, WikiProject } from "@/types/wiki"
-import { ensureProjectId, upsertProjectInfo } from "@/lib/project-identity"
-import { isAbsolutePath } from "@/lib/path-utils"
+import { ensureProjectId, upsertProjectInfo } from "@/lib/utils/project-identity"
+import { isAbsolutePath } from "@/lib/utils/path-utils"
 
 /** Raw shape returned by the Rust commands — id is attached client-side. */
 interface RawProject {

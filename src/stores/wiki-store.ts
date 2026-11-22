@@ -1,13 +1,13 @@
 import { create } from "zustand"
 import type { WikiProject, FileNode } from "@/types/wiki"
-import { DEFAULT_SOURCE_WATCH_CONFIG } from "@/lib/source-watch-config"
+import { DEFAULT_SOURCE_WATCH_CONFIG } from "@/lib/tauri/source-watch-config"
 import {
   buildProjectPathIndexFromTree,
   createEmptyProjectPathIndex,
   type ProjectPathIndex,
-} from "@/lib/wiki-page-resolver"
-import { DEFAULT_GRAPH_FILTERS, type GraphFilterState } from "@/lib/graph-filters"
-import type { OutputLanguage } from "@/lib/output-language-options"
+} from "@/lib/utils/wiki-page-resolver"
+import { DEFAULT_GRAPH_FILTERS, type GraphFilterState } from "@/lib/graph/graph-filters"
+import type { OutputLanguage } from "@/lib/i18n-support/output-language-options"
 
 /**
  * Wire protocol used when `provider === "custom"`. Other providers have a
