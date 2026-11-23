@@ -1,7 +1,16 @@
-// prompt.ts (prompt construction + budget math) — split from the original 3806-line src/lib/ingest.ts (M2).
-// See openspec/changes/refactor-web-app/design.md.
+// prompt.ts — prompt-building blocks + budget math + chunking.
+// Split from src/lib/ingest/ingest.ts (M2 of refactor-web-app).
 
+import type { LlmConfig } from "@/stores/wiki-store"
+import type { MergeFn } from "@/lib/page-merge"
+import { GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
+import { computeContextBudget } from "@/lib/context-budget"
+import { buildLanguageDirective } from "@/lib/output-language"
 import { PROJECT_LOCAL_TERM_QUERY_RULES } from "@/lib/research-query-grounding"
+import { parseFrontmatter } from "@/lib/frontmatter"
+import { streamChat } from "@/lib/llm-client"
+import { currentWikiDate } from "./commit"
+
 
 const LONG_SOURCE_MIN_BUDGET = 8_000
 
@@ -17,9 +26,13 @@ const INGEST_GENERATION_TOKENS_512K = 32_768
 
 const INGEST_ANALYSIS_TOKENS_MIN = 4_096
 
-const INGEST_ANALYSIS_TOKENS_MAX = 8_192
+export const INGEST_ANALYSIS_TOKENS_MAX = 8_192
 
 const CONSERVATIVE_CHARS_PER_OUTPUT_TOKEN = 4
+
+export const REVIEW_STAGE_MIN_SIGNAL_CHARS = 10_000
+
+export const REVIEW_STAGE_MIN_FILE_BLOCKS = 4
 
 interface SourceChunk {
   id: string
@@ -30,21 +43,30 @@ interface SourceChunk {
   main: string
 }
 
-export function languageRule(sourceContent: string = ""): string {
-  return buildLanguageDirective(sourceContent)
+export interface LongSourcePlan {
+  chunked: boolean
+  analysis: string
+  sourceContext: string
+  checkpointPath?: string
 }
 
-export function formatIngestWarningLogEntry(
-  sourceIdentity: string,
-  warnings: readonly string[],
-  at = new Date(),
-): string {
-  return [
-    `## ${at.toISOString()} | ${sourceIdentity}`,
-    "",
-    ...warnings.map((warning, index) => `${index + 1}. ${warning}`),
-    "",
-  ].join("\n")
+export interface LongSourceCheckpoint {
+  version: 1
+  sourceIdentity: string
+  sourceHash: string
+  sourceLength: number
+  sourceBudget: number
+  targetChars: number
+  overlapChars: number
+  chunkTotal: number
+  completedThrough: number
+  globalDigest: string
+  analyses: string[]
+  updatedAt: number
+}
+
+export function languageRule(sourceContent: string = ""): string {
+  return buildLanguageDirective(sourceContent)
 }
 
 export function buildDeterministicIngestLog(
@@ -56,13 +78,6 @@ export function buildDeterministicIngestLog(
   return existing.trim()
     ? `${existing.trimEnd()}\n\n${entry}\n`
     : `# Wiki Log\n\n${entry}\n`
-}
-
-export function currentWikiDate(now: Date = new Date()): string {
-  const year = now.getFullYear()
-  const month = String(now.getMonth() + 1).padStart(2, "0")
-  const day = String(now.getDate()).padStart(2, "0")
-  return `${year}-${month}-${day}`
 }
 
 const ENTITY_ANALYSIS_RULES = [
@@ -84,6 +99,11 @@ const LONG_SOURCE_ENTITY_RULES = [
   "In Updated Global Digest > Entities, accumulate recurrence across chunks and output for each candidate: canonical name, identity, supporting chunks, significance evidence, and `Page-worthy: yes` or `Page-worthy: no`.",
   ...ENTITY_ANALYSIS_RULES,
 ] as const
+
+/**
+ * Step 1 prompt: AI reads the source and produces a structured analysis.
+ * This is the "discussion" step — the AI reasons about the source before writing wiki pages.
+ */
 
 export function buildAnalysisPrompt(
   purpose: string,
@@ -379,10 +399,40 @@ export function buildReviewSuggestionPrompt(
   ].filter(Boolean).join("\n")
 }
 
-export function filterTruncatedFileRepairOutput(
-  text: string,
-  allowedPaths: readonly string[],
-): { text: string; paths: string[]; warnings: string[] } {
+type TruncatedFileRepairContext = {
+  readonly schema: string
+  readonly purpose: string
+  readonly analysis: string
+  readonly sourceContext: string
+  readonly maxContextSize: number | undefined
+}
+
+export function buildTruncatedFileRepairPrompt(
+  paths: readonly string[],
+  sourceIdentity: string,
+  context: TruncatedFileRepairContext,
+): string {
+  const { schema, purpose, analysis, sourceContext, maxContextSize } = context
+  const { maxCtx } = computeContextBudget(maxContextSize)
+  const sectionCap = Math.max(4_000, Math.floor(maxCtx * 0.12))
+  return [
+    "You are repairing truncated wiki FILE blocks from an earlier generation.",
+    "Return exactly one complete FILE block for each requested path and no other files.",
+    "Every block must end with `---END FILE---`. Do not output a preamble, REVIEW blocks, or trailing commentary.",
+    "Preserve the requested paths exactly and include the source identity in each page's frontmatter `sources` field.",
+    "",
+    languageRule(sourceContext),
+    "",
+    "## Requested paths",
+    ...paths.map((path) => `- ${path}`),
+    "",
+    `## Source identity\n${sourceIdentity}`,
+    schema ? `## Project schema\n${trimLongText(schema, sectionCap)}` : "",
+    purpose ? `## Wiki purpose\n${trimLongText(purpose, sectionCap)}` : "",
+    `## Stage 1 analysis\n${trimLongText(analysis, sectionCap)}`,
+    `## Source context\n${trimLongText(sourceContext, sectionCap)}`,
+  ].filter(Boolean).join("\n")
+}
 
 function clampNumber(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value))
@@ -424,7 +474,72 @@ export function computeIngestReviewMaxTokens(maxContextSize: number | undefined)
   return Math.min(8_192, Math.max(4_096, Math.floor(computeIngestGenerationMaxTokens(maxContextSize) / 2)))
 }
 
+function splitOversizedBlock(block: string, targetChars: number): string[] {
+  if (block.length <= targetChars * 1.25) return [block]
+
+  const pieces = block.match(/[^.!?。！？\n]+[.!?。！？]?|\n+/g) ?? [block]
+  const out: string[] = []
+  let current = ""
+  for (const piece of pieces) {
+    if (current && current.length + piece.length > targetChars) {
+      out.push(current.trim())
+      current = ""
+    }
+    if (piece.length > targetChars) {
+      for (let i = 0; i < piece.length; i += targetChars) {
+        const slice = piece.slice(i, i + targetChars).trim()
+        if (slice) out.push(slice)
+      }
+    } else {
+      current += piece
+    }
+  }
+  if (current.trim()) out.push(current.trim())
+  return out
+}
+
 function semanticBlocks(content: string, targetChars: number): Array<{ text: string; headingPath: string }> {
+  const blocks: Array<{ text: string; headingPath: string }> = []
+  const headingStack: string[] = []
+  let paragraph: string[] = []
+  let paragraphHeading = ""
+
+  const currentHeadingPath = () => headingStack.filter(Boolean).join(" > ")
+  const flushParagraph = () => {
+    const text = paragraph.join("\n").trim()
+    if (text) {
+      for (const piece of splitOversizedBlock(text, targetChars)) {
+        blocks.push({ text: piece, headingPath: paragraphHeading })
+      }
+    }
+    paragraph = []
+  }
+
+  for (const line of content.replace(/\r\n/g, "\n").split("\n")) {
+    const heading = /^(#{1,6})\s+(.+?)\s*$/.exec(line)
+    if (heading) {
+      flushParagraph()
+      const depth = heading[1].length
+      headingStack.length = depth - 1
+      headingStack[depth - 1] = heading[2].trim()
+      blocks.push({ text: line.trim(), headingPath: currentHeadingPath() })
+      paragraphHeading = currentHeadingPath()
+      continue
+    }
+
+    if (line.trim() === "") {
+      flushParagraph()
+      paragraphHeading = currentHeadingPath()
+      continue
+    }
+
+    if (paragraph.length === 0) paragraphHeading = currentHeadingPath()
+    paragraph.push(line)
+  }
+  flushParagraph()
+
+  return blocks
+}
 
 function overlapSuffix(text: string, maxChars: number): string {
   if (!text || maxChars <= 0) return ""
@@ -483,9 +598,26 @@ export function splitSourceIntoSemanticChunks(
   }))
 }
 
-function trimLongText(text: string, maxChars: number): string {
+export function trimLongText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
   return `${text.slice(0, maxChars).trimEnd()}\n\n[...trimmed for prompt budget...]`
+}
+
+export function trimInlineStatus(text: string, maxChars = 240): string {
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars).trimEnd()}...`
+}
+
+export function hashTextHex(text: string): string {
+  // 64-bit FNV-1a over UTF-16 code units. This is a stability key, not
+  // a security primitive; validation also checks source length/chunk
+  // shape before resuming a checkpoint.
+  let hash = 0xcbf29ce484222325n
+  const prime = 0x100000001b3n
+  for (let i = 0; i < text.length; i++) {
+    hash ^= BigInt(text.charCodeAt(i))
+    hash = BigInt.asUintN(64, hash * prime)
+  }
+  return hash.toString(16).padStart(16, "0")
 }
 
 export function buildChunkAnalysisSystemPrompt(
@@ -525,6 +657,99 @@ export function buildChunkAnalysisSystemPrompt(
     schema ? `## Wiki Schema\n${schema}` : "",
     index ? `## Current Wiki Index\n${trimLongText(index, 40_000)}` : "",
   ].filter(Boolean).join("\n")
+}
+
+export function buildChunkAnalysisUserPrompt(
+  sourceIdentity: string,
+  folderContext: string | undefined,
+  chunk: SourceChunk,
+  globalDigest: string,
+): string {
+  return [
+    `Source file: ${sourceIdentity}`,
+    folderContext ? `Folder context: ${folderContext}` : "",
+    `Chunk: ${chunk.index}/${chunk.total}`,
+    chunk.headingPath ? `Heading path: ${chunk.headingPath}` : "",
+    "",
+    "## Current Global Digest",
+    globalDigest || "(No prior digest yet.)",
+    "",
+    chunk.overlapBefore ? "## Previous Overlap Context\n" + chunk.overlapBefore : "",
+    "",
+    "## MAIN CHUNK TO ANALYZE",
+    chunk.main,
+    "",
+    "Return only the two requested sections. Do not repeat overlap-only facts unless the main chunk supports them.",
+  ].filter(Boolean).join("\n")
+}
+
+export function buildPageMerger(llmConfig: LlmConfig): MergeFn {
+  return async (existingContent, incomingContent, sourceFileName, signal) => {
+    const systemPrompt = buildPageMergeSystemPrompt()
+    const sanitizeProvenance = (value: string) => value
+      .replace(/[\r\n#`]+/g, " ")
+      .replace(/---+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 240)
+    const safeSourceFileName = sanitizeProvenance(sourceFileName)
+    const existingSources = parseFrontmatter(existingContent).frontmatter?.sources
+    const existingProvenance = Array.isArray(existingSources)
+      ? existingSources
+        .filter((source): source is string => typeof source === "string")
+        .map(sanitizeProvenance)
+        .filter(Boolean)
+        .join(", ")
+        .slice(0, 1_000)
+      : "sources listed in the existing page frontmatter"
+
+    const userMessage = [
+      `## Previously collected material (provenance: ${existingProvenance || "existing page sources"})`,
+      "",
+      existingContent,
+      "",
+      "---",
+      "",
+      `## Additional material (provenance: ${safeSourceFileName || "additional source"})`,
+      "",
+      incomingContent,
+      "",
+      "---",
+      "",
+      "Now output the merged file. Start with `---` on the first line.",
+    ].join("\n")
+
+    let result = ""
+    let streamError: Error | null = null
+    await new Promise<void>((resolve) => {
+      streamChat(
+        llmConfig,
+        [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userMessage },
+        ],
+        {
+          onToken: (token: string) => {
+            result += token
+          },
+          onDone: () => resolve(),
+          onError: (err: Error) => {
+            streamError = err
+            resolve()
+          },
+        },
+        signal,
+        { temperature: 0.1 },
+      ).catch((err: unknown) => {
+        // Defensive: streamChat returns a Promise<void>; if it rejects
+        // (instead of going through onError), surface that too.
+        streamError = err instanceof Error ? err : new Error(String(err))
+        resolve()
+      })
+    })
+    if (streamError) throw streamError
+    return result
+  }
 }
 
 export function buildPageMergeSystemPrompt(): string {

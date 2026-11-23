@@ -1,7 +1,7 @@
-// Barrel for the ingest domain (M2 of refactor-web-app).
-// Re-exports the public API of the four submodules split from the original
-// 3806-line ingest.ts, plus the queue API from ingest-queue.ts.
+// index.ts — barrel for src/lib/ingest/ (M2 of refactor-web-app).
 export * from "./prompt";
 export * from "./parse";
 export * from "./commit";
+export * from "./long-source";
+export * from "./image-extraction";
 export * from "./queue";

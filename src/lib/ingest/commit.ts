@@ -1,35 +1,107 @@
-// commit.ts (write-to-disk + state commit) — split from the original 3806-line src/lib/ingest.ts (M2).
-// See openspec/changes/refactor-web-app/design.md.
+// commit.ts — disk-write / state-commit (the autoIngest pipeline).
+// Split from src/lib/ingest/ingest.ts (M2 of refactor-web-app).
 
-import { createDirectory, deleteFile, fileExists, getFileModifiedTime, getFileSize, readFile, readFileAsBase64, writeFile, listDirectory } from "@/commands/fs"
-import { sourceIdentityForPath, sourceReferenceIdentity, sourceSummarySlugCandidatesFromIdentity, sourceSummarySlugFromIdentity } from "@/lib/source-identity"
-import { extractAndSaveSourceImages, extractAndSaveMarkdownImages, type SavedImage } from "@/lib/extract-source-images"
-import { captionMarkdownImages, stripMarkdownImageReferences } from "@/lib/image-caption-pipeline"
-import { PROJECT_LOCAL_TERM_QUERY_RULES } from "@/lib/research-query-grounding"
+import {
+  createDirectory,
+  deleteFile,
+  fileExists,
+  readFile,
+  writeFile,
+  listDirectory,
+} from "@/commands/fs"
+import { streamChat } from "@/lib/llm-client"
+import type { LlmConfig, ReasoningConfig } from "@/stores/wiki-store"
+import { useWikiStore } from "@/stores/wiki-store"
+import { parseWithMineruResult } from "@/lib/mineru"
+import { useChatStore } from "@/stores/chat-store"
+import { useActivityStore } from "@/stores/activity-store"
+import { useReviewStore } from "@/stores/review-store"
+import { getFileName, normalizePath } from "@/lib/path-utils"
+import {
+  sourceIdentityForPath,
+  sourceReferenceIdentity,
+  sourceSummarySlugCandidatesFromIdentity,
+  sourceSummarySlugFromIdentity,
+} from "@/lib/source-identity"
+import { parseSources, writeSources } from "@/lib/sources-merge"
+import { checkIngestCache, saveIngestCache } from "@/lib/ingest-cache"
+import { sanitizeIngestedFileContent } from "@/lib/ingest-sanitize"
+import { mergePageContent } from "@/lib/page-merge"
+import { withProjectLock } from "@/lib/project-mutex"
+import { parseFrontmatter } from "@/lib/frontmatter"
+import type { FileNode } from "@/types/wiki"
+import {
+  extractAndSaveSourceImages,
+  extractAndSaveMarkdownImages,
+  buildImageMarkdownSection,
+  type SavedImage,
+} from "@/lib/extract-source-images"
+import {
+  captionMarkdownImages,
+  loadCaptionCache,
+  stripMarkdownImageReferences,
+} from "@/lib/image-caption-pipeline"
+import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
+import { persistParsedMarkdown } from "@/lib/parsed-source-output"
+import { getOutputLanguage } from "@/lib/output-language"
+import { loadProjectWikiSchemaRouting } from "@/lib/wiki-schema"
+import {
+  languageRule,
+  buildDeterministicIngestLog,
+  buildAnalysisPrompt,
+  buildGenerationPrompt,
+  buildReviewSuggestionPrompt,
+  buildTruncatedFileRepairPrompt,
+  computeIngestSourceBudget,
+  computeIngestGenerationMaxTokens,
+  computeIngestReviewMaxTokens,
+  computeIngestAnalysisMaxTokens,
+  INGEST_ANALYSIS_TOKENS_MAX,
+  trimInlineStatus,
+  buildPageMerger,
+} from "./prompt"
+import {
+  imageExtractionKey,
+  rememberImageExtractionByKey,
+  savedImagesFromMineruMarkdown,
+  resolveCaptionConfig,
+  toSourceSummaryImageRef,
+  appendSavedImageRefsForCaption,
+  isSavedImagePromptUrl,
+  promptImageUrlToAbs,
+  stripWikiMediaAbsPaths,
+  extractSourceImagesOnce,
+  extractSourceImagesOnceByKey,
+  ingestImageExtractionPromises,
+} from "./image-extraction"
+import {
+  isLogPath,
+  isListingPath,
+  isAppManagedAggregatePath,
+  parseFileBlocks,
+  sourceSummaryMediaRefsForExternalMarkdown,
+  hasMineruImageRefs,
+  FILE_BLOCK_REGEX,
+  isSafeIngestPath,
+  rewriteIngestPathFromTitleForTargetLanguage,
+  filterTruncatedFileRepairOutput,
+  parseReviewBlocks,
+  contentMatchesTargetLanguage,
+  shouldRunDedicatedReviewStage,
+} from "./parse"
+import {
+  clearGenerationCheckpoint,
+  clearLongSourceCheckpoint,
+  analyzeLongSourceInChunks,
+  generationCheckpointPath,
+  sourceGenerationFingerprint,
+  saveGenerationCheckpoint,
+  loadGenerationCheckpoint,
+} from "./long-source"
+import { correctWikiPageRouting, validateWikiPageRouting } from "@/lib/graph/wiki-schema"
+import { getLanguagePromptName } from "@/lib/i18n-support/language-metadata"
+import { resolveIngestReasoning } from "@/lib/reasoning-capabilities"
 
-const LONG_SOURCE_MIN_BUDGET = 8_000
-
-const LONG_SOURCE_MAX_SINGLE_PASS_BUDGET = 300_000
-
-const LONG_SOURCE_CHUNK_MIN = 12_000
-
-const LONG_SOURCE_CHUNK_MAX = 60_000
-
-const LONG_SOURCE_DIGEST_MAX = 15_000
-
-const LONG_SOURCE_CHUNK_ANALYSIS_MAX = 40_000
-
-const INGEST_GENERATION_TOKENS_DEFAULT = 8_192
-
-const INGEST_GENERATION_TOKENS_128K = 16_384
-
-const INGEST_GENERATION_TOKENS_256K = 24_576
-
-const INGEST_GENERATION_TOKENS_512K = 32_768
-
-const REVIEW_STAGE_MIN_SIGNAL_CHARS = 10_000
-
-const REVIEW_STAGE_MIN_FILE_BLOCKS = 4
 
 const AGGREGATE_WIKI_PATHS = ["wiki/index.md", "wiki/overview.md", "wiki/log.md"] as const
 
@@ -42,445 +114,34 @@ export class NonRetryableIngestError extends Error {
   }
 }
 
-function appendSavedImageRefsForCaption(content: string, images: SavedImage[]): string {
-  if (images.length === 0) return content
-  const refs = images
-    .map((img) => img.relPath)
-    .filter(Boolean)
-    .map((relPath) => `![](${relPath})`)
-  if (refs.length === 0) return content
-  return `${content}\n\n## Referenced Local Images\n\n${refs.join("\n")}\n`
-}
-
 function ingestAnalysisRequest(config: LlmConfig): {
   maxTokens: number
   reasoning: ReasoningConfig
 } {
-
-const ingestImageExtractionPromises = new Map<string, Promise<SavedImage[]>>()
-
-async function imageExtractionKey(
-  projectPath: string,
-  sourcePath: string,
-  sourceSummarySlug: string,
-): Promise<string> {
-  const normalizedSource = normalizePath(sourcePath)
-  let fingerprint: string
-  try {
-    const [size, mtime] = await Promise.all([
-      getFileSize(normalizedSource),
-      getFileModifiedTime(normalizedSource),
-    ])
-    fingerprint = `${size}:${mtime}`
-  } catch {
-    // If the source disappeared or stat fails, avoid reusing a stale
-    // promise from a previous ingest of the same path.
-    fingerprint = `unstable:${Date.now()}`
-  }
-  return `${normalizePath(projectPath)}\n${normalizedSource}\n${sourceSummarySlug}\n${fingerprint}`
-}
-
-function rememberImageExtractionByKey(
-  key: string,
-  promise: Promise<SavedImage[]>,
-): Promise<SavedImage[]> {
-  ingestImageExtractionPromises.set(key, promise)
-  if (ingestImageExtractionPromises.size > 32) {
-    const oldest = ingestImageExtractionPromises.keys().next().value
-    if (oldest) ingestImageExtractionPromises.delete(oldest)
-  }
-  promise.catch(() => {
-    if (ingestImageExtractionPromises.get(key) === promise) {
-      ingestImageExtractionPromises.delete(key)
-    }
-  })
-  return promise
-}
-
-function extractSourceImagesOnceByKey(
-  key: string,
-  projectPath: string,
-  sourcePath: string,
-  sourceSummarySlug: string,
-): Promise<SavedImage[]> {
-  const existing = ingestImageExtractionPromises.get(key)
-  if (existing) return existing
-  return rememberImageExtractionByKey(
-    key,
-    extractAndSaveSourceImages(projectPath, sourcePath, sourceSummarySlug),
-  )
-}
-
-async function extractSourceImagesOnce(
-  projectPath: string,
-  sourcePath: string,
-  sourceSummarySlug: string,
-): Promise<SavedImage[]> {
-  const key = await imageExtractionKey(projectPath, sourcePath, sourceSummarySlug)
-  return extractSourceImagesOnceByKey(key, projectPath, sourcePath, sourceSummarySlug)
-}
-
-function isSavedImagePromptUrl(projectPath: string, sourceSummarySlug: string, url: string): boolean {
-  return (
-    url.startsWith(`${projectPath}/wiki/media/${sourceSummarySlug}/`) ||
-    url.startsWith(`media/${sourceSummarySlug}/`)
-  )
-}
-
-function promptImageUrlToAbs(projectPath: string, url: string): string {
-  return url.startsWith("media/") ? `${projectPath}/wiki/${url}` : url
-}
-
-function imageMimeTypeFromPath(path: string): string {
-  const ext = getFileName(path).split(".").pop()?.toLowerCase() ?? ""
-  switch (ext) {
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg"
-    case "png":
-      return "image/png"
-    case "gif":
-      return "image/gif"
-    case "webp":
-      return "image/webp"
-    case "bmp":
-      return "image/bmp"
-    case "svg":
-      return "image/svg+xml"
-    case "tif":
-    case "tiff":
-      return "image/tiff"
-    default:
-      return "application/octet-stream"
-  }
-}
-
-async function sha256OfBase64(b64: string): Promise<string> {
-  const binary = atob(b64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
-  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
-  const digest = await crypto.subtle.digest("SHA-256", buffer)
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("")
-}
-
-async function savedImagesFromMineruMarkdown(
-  projectPath: string,
-  sourceSummarySlug: string,
-  markdown: string,
-): Promise<SavedImage[]> {
-  const pp = normalizePath(projectPath)
-  const prefix = `media/${sourceSummarySlug}/mineru/`
-  const encodedPrefix = `media/${encodeMarkdownPathSegment(sourceSummarySlug)}/mineru/`
-  const refs: string[] = []
-  const seen = new Set<string>()
-
-  for (const match of markdown.matchAll(/!\[[^\]]*]\(((?:[^()]|\([^()]*\))*)\)/g)) {
-    const rawTarget = (match[1] ?? "").trim()
-    const url = rawTarget.startsWith("<") && rawTarget.includes(">")
-      ? rawTarget.slice(1, rawTarget.indexOf(">"))
-      : rawTarget.split(/\s+["']/)[0]
-    if (!url) continue
-    let decoded = url
-    try {
-      decoded = decodeURIComponent(url)
-    } catch {
-      // Keep the raw URL if it is not valid percent-encoding.
-    }
-    const normalized = normalizePath(decoded.replace(/^\.\//, ""))
-    if (!normalized.startsWith(prefix) && !normalized.startsWith(encodedPrefix)) continue
-    const relPath = normalized.startsWith(encodedPrefix)
-      ? `media/${sourceSummarySlug}/mineru/${normalized.slice(encodedPrefix.length)}`
-      : normalized
-    if (seen.has(relPath)) continue
-    seen.add(relPath)
-    refs.push(relPath)
-  }
-
-  const images: SavedImage[] = []
-  for (const relPath of refs) {
-    const absPath = `${pp}/wiki/${relPath}`
-    try {
-      const { base64 } = await readFileAsBase64(absPath)
-      images.push({
-        index: images.length + 1,
-        mimeType: imageMimeTypeFromPath(relPath),
-        page: null,
-        width: 0,
-        height: 0,
-        relPath,
-        absPath,
-        sha256: await sha256OfBase64(base64),
-      })
-    } catch (err) {
-      console.warn(
-        `[ingest:mineru] failed to read cached MinerU image "${relPath}":`,
-        err instanceof Error ? err.message : err,
-      )
-    }
-  }
-  return images
-}
-
-function stripWikiMediaAbsPaths(projectPath: string, content: string): string {
-  return content.split(`${projectPath}/wiki/media/`).join("media/")
-}
-
-export function sourceSummaryMediaRefsForExternalMarkdown(content: string): string {
-  return content
-    .replace(/(\]\()\.?\/?media\//g, "$1../media/")
-    .replace(/(\bsrc=["'])\.?\/?media\//gi, "$1../media/")
-}
-
-function encodeMarkdownPathSegment(segment: string): string {
-  return encodeURIComponent(segment).replace(/[!'()*]/g, (char) =>
-    `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
-  )
-}
-
-export function hasMineruImageRefs(content: string, sourceSummarySlug: string): boolean {
-  return (
-    content.includes(`media/${sourceSummarySlug}/mineru/`) ||
-    content.includes(`media/${encodeMarkdownPathSegment(sourceSummarySlug)}/mineru/`)
-  )
-}
-
-interface SourceChunk {
-  id: string
-  index: number
-  total: number
-  headingPath: string
-  overlapBefore: string
-  main: string
-}
-
-interface LongSourcePlan {
-  chunked: boolean
-  analysis: string
-  sourceContext: string
-  checkpointPath?: string
-}
-
-interface LongSourceCheckpoint {
-  version: 1
-  sourceIdentity: string
-  sourceHash: string
-  sourceLength: number
-  sourceBudget: number
-  targetChars: number
-  overlapChars: number
-  chunkTotal: number
-  completedThrough: number
-  globalDigest: string
-  analyses: string[]
-  updatedAt: number
-}
-
-interface GenerationCheckpoint {
-  version: 1
-  sourceIdentity: string
-  sourceFingerprint: string
-  completedPaths: string[]
-  updatedAt: number
-}
-
-function resolveCaptionConfig(
-  mm: MultimodalConfig,
-  mainLlm: LlmConfig,
-): LlmConfig | null {
-  if (!mm.enabled) return null
-  if (mm.useMainLlm) return mainLlm
-  return {
-    provider: mm.provider,
-    apiKey: mm.apiKey,
-    model: mm.model,
-    ollamaUrl: mm.ollamaUrl,
-    customEndpoint: mm.customEndpoint,
-    azureApiVersion: mm.azureApiVersion,
-    azureModelFamily: mm.azureModelFamily,
-    apiMode: mm.apiMode,
-    // The dedicated caption provider has no separate reasoning control. Reuse
-    // the ingest preference and let its own provider capabilities normalize it.
-    ingestReasoning: mainLlm.ingestReasoning,
-    // The caption helper hits `streamChat` directly, which doesn't
-    // care about `maxContextSize` (that field is for the analysis
-    // / generation prompt-truncation logic). Keep it set so the
-    // shape matches LlmConfig.
-    maxContextSize: mainLlm.maxContextSize,
-  }
-}
-
-export const FILE_BLOCK_REGEX = /---FILE:\s*([^\n]+?)\s*---\n([\s\S]*?)---END FILE---/g
-
-export interface ParsedFileBlock {
-  path: string
-  content: string
-}
-
-export interface ParseFileBlocksResult {
-  blocks: ParsedFileBlock[]
-  /** Human-readable notes for blocks we refused or couldn't close. Each
-   *  one is also console.warn'd. UI can surface these so users see that
-   *  something was skipped instead of silently getting fewer pages. */
-  warnings: string[]
-  truncatedPaths: string[]
-}
-
-const OPENER_LINE = /^---\s*FILE:\s*(.+?)\s*---\s*$/i
-
-const CLOSER_LINE = /^---\s*END\s+FILE\s*---\s*$/i
-
-export function isSafeIngestPath(p: string): boolean {
-  if (typeof p !== "string" || p.trim().length === 0) return false
-  // No control / NUL bytes anywhere.
-  if (/[\x00-\x1f]/.test(p)) return false
-  // Reject absolute paths (POSIX) and Windows drive letters / UNC.
-  if (p.startsWith("/") || p.startsWith("\\")) return false
-  if (/^[a-zA-Z]:/.test(p)) return false
-  // Normalize backslashes so a Windows-style payload doesn't sneak past.
-  const normalized = p.replace(/\\/g, "/")
-  // No `..` segments, regardless of position.
-  const segments = normalized.split("/")
-  if (segments.some((seg) => seg === "..")) return false
-  if (segments.some((seg) => !isWindowsSafePathSegment(seg))) return false
-  // Must live under wiki/ — the only tree the ingest pipeline writes to.
-  if (!normalized.startsWith("wiki/")) return false
-  return true
-}
-
-function isWindowsSafePathSegment(segment: string): boolean {
-  if (segment.length === 0) return false
-  if (/[<>:"|?*]/.test(segment)) return false
-  if (/[ .]$/.test(segment)) return false
-  const stem = segment.split(".")[0]?.toUpperCase()
-  if (!stem) return false
-  if (
-    stem === "CON" ||
-    stem === "PRN" ||
-    stem === "AUX" ||
-    stem === "NUL" ||
-    /^COM[1-9]$/.test(stem) ||
-    /^LPT[1-9]$/.test(stem)
-  ) {
-    return false
-  }
-  return true
-}
-
-const FENCE_LINE = /^\s{0,3}(```+|~~~+)/
-
-export function parseFileBlocks(text: string): ParseFileBlocksResult {
-  // H1 fix: normalize CRLF to LF before anything else. Cheap and
-  // covers the case where a proxy / server / LLM inserts Windows line
-  // endings into the stream.
-  const normalized = text.replace(/\r\n/g, "\n")
-  const lines = normalized.split("\n")
-
-  const blocks: ParsedFileBlock[] = []
-  const warnings: string[] = []
-  const truncatedPaths: string[] = []
-
-  let i = 0
-  while (i < lines.length) {
-    const openerMatch = OPENER_LINE.exec(lines[i])
-    if (!openerMatch) {
-      i++
-      continue
-    }
-    const path = openerMatch[1].trim()
-    i++ // consume opener
-
-    const contentLines: string[] = []
-    let fenceMarker: string | null = null // tracks whether we're inside ``` or ~~~
-    let fenceLen = 0
-    let closed = false
-
-    while (i < lines.length) {
-      const line = lines[i]
-
-      // H5 fix: update fence state before checking closer. Only close
-      // the fence when we see the same character repeated at least as
-      // many times — CommonMark rule. This lets docs-about-our-format
-      // quote `---END FILE---` inside code fences without truncating
-      // the outer block.
-      const fenceMatch = FENCE_LINE.exec(line)
-      if (fenceMatch) {
-        const run = fenceMatch[1]
-        const char = run[0] // '`' or '~'
-        const len = run.length
-        if (fenceMarker === null) {
-          fenceMarker = char
-          fenceLen = len
-        } else if (char === fenceMarker && len >= fenceLen) {
-          fenceMarker = null
-          fenceLen = 0
-        }
-        contentLines.push(line)
-        i++
-        continue
+  const contentTokens = computeIngestAnalysisMaxTokens(config.maxContextSize)
+  const requested = resolveIngestReasoning(config)
+  const reasoning = requested.mode === "custom"
+    ? {
+        ...requested,
+        budgetTokens: Math.max(
+          1_024,
+          Math.min(requested.budgetTokens ?? 0, INGEST_ANALYSIS_TOKENS_MAX),
+        ),
       }
-
-      // A line matching the closer ONLY counts when we're outside any
-      // code fence. Inside a fence, treat it as ordinary body text.
-      if (fenceMarker === null && CLOSER_LINE.test(line)) {
-        closed = true
-        i++
-        break
-      }
-
-      contentLines.push(line)
-      i++
-    }
-
-    if (!closed) {
-      // H2 fix (partial): we can't fabricate content the LLM never
-      // sent, but we surface the drop instead of silently hiding it.
-      const pathLabel = path || "(unnamed)"
-      const msg = `FILE block "${pathLabel}" was not closed before end of stream — likely truncation (model hit max_tokens, timeout, or connection dropped). Block dropped.`
-      console.warn(`[ingest] ${msg}`)
-      warnings.push(msg)
-      if (isSafeIngestPath(path)) truncatedPaths.push(path)
-      continue
-    }
-
-    if (!path) {
-      // H6 fix: surface empty-path blocks.
-      const msg = `FILE block with empty path skipped (LLM omitted the path after \`---FILE:\`).`
-      console.warn(`[ingest] ${msg}`)
-      warnings.push(msg)
-      continue
-    }
-
-    if (!isSafeIngestPath(path)) {
-      // Path-traversal guard. Drops blocks whose path tries to escape
-      // wiki/ — see isSafeIngestPath for the threat model.
-      const msg = `FILE block with unsafe path "${path}" rejected (must be under wiki/, no .., no absolute paths, and Windows-safe file names).`
-      console.warn(`[ingest] ${msg}`)
-      warnings.push(msg)
-      continue
-    }
-
-    blocks.push({ path, content: contentLines.join("\n") })
-  }
-
-  return { blocks, warnings, truncatedPaths }
-}
-
-export function languageRule(sourceContent: string = ""): string {
-  return buildLanguageDirective(sourceContent)
+    : requested
+  const reasoningTokens = reasoning.mode === "low"
+    ? 1_024
+    : reasoning.mode === "medium"
+      ? 4_096
+      : reasoning.mode === "high" || reasoning.mode === "max"
+        ? 8_192
+        : reasoning.mode === "custom"
+          ? reasoning.budgetTokens ?? 0
+          : 0
+  return { maxTokens: contentTokens + reasoningTokens, reasoning }
 }
 
 export type IngestCommitRunner = <T>(operation: () => Promise<T>) => Promise<T>
-
-export interface AutoIngestOptions {
-  /**
-   * Adds queue ordering around a commit. The supplied runner must not acquire
-   * the project mutex; autoIngest always acquires it inside this callback.
-   */
-  runCommit?: IngestCommitRunner
-}
 
 export interface AutoIngestOptions {
   /**
@@ -537,17 +198,6 @@ export function formatIngestWarningLogEntry(
     ...warnings.map((warning, index) => `${index + 1}. ${warning}`),
     "",
   ].join("\n")
-}
-
-export function buildDeterministicIngestLog(
-  existing: string,
-  sourceIdentity: string,
-  date = currentWikiDate(),
-): string {
-  const entry = `## [${date}] ingest | ${sourceIdentity}`
-  return existing.trim()
-    ? `${existing.trimEnd()}\n\n${entry}\n`
-    : `# Wiki Log\n\n${entry}\n`
 }
 
 async function appendIngestWarningLog(
@@ -1456,73 +1106,6 @@ async function autoIngestImpl(
   })
 }
 
-function isLogPath(relativePath: string): boolean {
-  return relativePath === "wiki/log.md" || relativePath.endsWith("/log.md")
-}
-
-function isListingPath(relativePath: string): boolean {
-  return (
-    relativePath === "wiki/index.md" ||
-    relativePath.endsWith("/index.md") ||
-    relativePath === "wiki/overview.md" ||
-    relativePath.endsWith("/overview.md")
-  )
-}
-
-export function isAppManagedAggregatePath(relativePath: string): boolean {
-  const normalized = relativePath.replace(/\\/g, "/").toLowerCase()
-  return normalized === "wiki/index.md" || normalized === "wiki/overview.md"
-}
-
-const CJK_OUTPUT_LANGUAGES = new Set(["Chinese", "Traditional Chinese", "Japanese", "Korean"])
-
-function containsCjk(text: string): boolean {
-  return /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/u.test(text)
-}
-
-function extractGeneratedPageTitle(content: string): string | null {
-  const title = parseFrontmatter(content).frontmatter?.title
-  if (typeof title === "string" && title.trim()) return title.trim()
-  const heading = content.match(/^#\s+(.+)$/m)?.[1]?.trim()
-  return heading || null
-}
-
-export function rewriteIngestPathFromTitleForTargetLanguage(
-  relativePath: string,
-  content: string,
-  targetLang: string | undefined,
-): string {
-  const title = extractGeneratedPageTitle(content)
-  // "auto" (the default output language) means "follow the source", so resolve
-  // it from the generated title. The title is the filename authority; using
-  // the whole body lets large SQL/code blocks or English technical prose
-  // outweigh a short CJK title and silently retain an ASCII filename.
-  const shouldUseCjkFilename = !targetLang || targetLang === "auto"
-    ? Boolean(title && containsCjk(title))
-    : CJK_OUTPUT_LANGUAGES.has(targetLang)
-  if (!shouldUseCjkFilename) {
-    return relativePath
-  }
-  if (
-    isLogPath(relativePath) ||
-    isListingPath(relativePath) ||
-    relativePath.startsWith("wiki/sources/")
-  ) {
-    return relativePath
-  }
-  if (!title || !containsCjk(title)) return relativePath
-
-  const slash = relativePath.lastIndexOf("/")
-  const dir = slash >= 0 ? relativePath.slice(0, slash + 1) : ""
-  const fileName = slash >= 0 ? relativePath.slice(slash + 1) : relativePath
-  if (containsCjk(fileName)) return relativePath
-
-  const slug = makeQuerySlug(title)
-  if (!containsCjk(slug)) return relativePath
-  const nextPath = `${dir}${slug}.md`
-  return isSafeIngestPath(nextPath) ? nextPath : relativePath
-}
-
 async function updateWikiIndexDeterministically(
   projectPath: string,
   writtenPaths: string[],
@@ -1852,435 +1435,202 @@ async function writeFileBlocks(
   hardFailures: string[]
   truncatedPaths: string[]
 }> {
+  const { blocks, warnings: parseWarnings, truncatedPaths } = parseFileBlocks(text)
+  const warnings = [...parseWarnings]
+  const writtenPaths: string[] = []
+  // Keep the model-requested path separate from the final path. Path
+  // canonicalization may rename the file after parsing, but callers that
+  // repair a specific FILE block still need to know that request succeeded.
+  const completedInputPaths: string[] = []
+  // "Hard failures" = blocks we INTENDED to write but the FS rejected
+  // (disk full, permission, OS-level errors). Distinct from soft drops
+  // (language mismatch, parse warnings, path-traversal rejections):
+  // those represent intentional content-level decisions, while hard
+  // failures are unexpected losses. The autoIngest cache layer keys
+  // off this list — any hard failure means the cache entry must NOT
+  // be written, so the next re-ingest goes through the full pipeline
+  // instead of replaying the partial result forever.
+  const hardFailures: string[] = []
+  const projectSchemaRouting = await loadProjectWikiSchemaRouting(projectPath)
 
-const REVIEW_BLOCK_REGEX = /---REVIEW:\s*(\w[\w-]*)\s*\|\s*(.+?)\s*---\n([\s\S]*?)---END REVIEW---/g
-
-function parseReviewBlocks(
-  text: string,
-  sourcePath: string,
-): Omit<ReviewItem, "id" | "resolved" | "createdAt">[] {
-  const items: Omit<ReviewItem, "id" | "resolved" | "createdAt">[] = []
-  const matches = text.matchAll(REVIEW_BLOCK_REGEX)
-
-  for (const match of matches) {
-    const rawType = match[1].trim().toLowerCase()
-    const title = match[2].trim()
-    const body = match[3].trim()
-
-    const type = (
-      ["contradiction", "duplicate", "missing-page", "suggestion"].includes(rawType)
-        ? rawType
-        : "confirm"
-    ) as ReviewItem["type"]
-
-    // Parse OPTIONS line
-    const optionsMatch = body.match(/^OPTIONS:\s*(.+)$/m)
-    const options = optionsMatch
-      ? optionsMatch[1].split("|").map((o) => {
-          const label = o.trim()
-          return { label, action: label }
-        })
-      : [
-          { label: "Approve", action: "Approve" },
-          { label: "Skip", action: "Skip" },
-        ]
-
-    // Parse PAGES line
-    const pagesMatch = body.match(/^PAGES:\s*(.+)$/m)
-    const affectedPages = pagesMatch
-      ? pagesMatch[1].split(",").map((p) => p.trim())
-      : undefined
-
-    // Parse SEARCH line (optimized search queries for Deep Research)
-    const searchMatch = body.match(/^SEARCH:\s*(.+)$/m)
-    const searchQueries = searchMatch
-      ? searchMatch[1].split("|").map((q) => q.trim()).filter((q) => q.length > 0)
-      : undefined
-
-    // Description is the body minus OPTIONS, PAGES, and SEARCH lines
-    const description = body
-      .replace(/^OPTIONS:.*$/m, "")
-      .replace(/^PAGES:.*$/m, "")
-      .replace(/^SEARCH:.*$/m, "")
-      .trim()
-
-    items.push({
-      type,
-      title,
-      description,
-      sourcePath,
-      affectedPages,
-      searchQueries,
-      options,
-    })
-  }
-
-  return items
-}
-
-function countFileBlocks(text: string): number {
-  return (text.match(/---FILE:\s*[^-]+---/g) ?? []).length
-}
-
-function shouldRunDedicatedReviewStage(generation: string): boolean {
-  return generation.length >= REVIEW_STAGE_MIN_SIGNAL_CHARS
-    || countFileBlocks(generation) >= REVIEW_STAGE_MIN_FILE_BLOCKS
-    || /---REVIEW:\s*[\w-]+\s*\|[\s\S]*$/i.test(generation)
-}
-
-const ENTITY_ANALYSIS_RULES = [
-  "Apply a standalone-page significance threshold: page-worthy subjects are central to the source, recur meaningfully, carry substantive claims, or are reusable across the wiki.",
-  "Do not mark passing mentions, ordinary story props, unnamed or generic-role people, chapter/part labels, or internal workflow artifacts as page-worthy unless the source makes them independently important knowledge subjects.",
-  "For every candidate, output `Page-worthy: yes` or `Page-worthy: no` plus one short justification. Keep non-page-worthy candidates only as context for the source summary.",
-  "Canonical naming priority: reuse the exact title of an existing wiki page first; otherwise preserve the source spelling. Widely used localized names may be recorded as aliases, but never invent or phonetically guess a name.",
-] as const
-
-const ENTITY_PAGE_RULES = [
-  "Create a standalone entity page only for a candidate explicitly marked `Page-worthy: yes`. Keep other mentions as plain prose in the source summary, or as wikilinks only when the target already exists in the current wiki index.",
-  "Canonical naming priority: reuse the exact title of an existing wiki page first; otherwise preserve the source spelling. A widely used localized name may be an alias, but never invent or phonetically guess a name.",
-  "The opening paragraph of every entity page must answer what the subject is, not merely describe its role in this source.",
-  "Prefer an identity supported by the source or existing wiki. If one short identity sentence must use stable, high-confidence public knowledge to identify a well-known subject, clearly label it as independently verifiable background in the mandatory output language so it is not attributed to the imported source. Never add uncertain details; when neither the source nor existing wiki establishes an unambiguous identity, do not create the standalone page.",
-] as const
-
-const LONG_SOURCE_ENTITY_RULES = [
-  "In each Chunk Analysis, record named-subject mentions and identity evidence without making a final standalone-page decision from one chunk alone.",
-  "In Updated Global Digest > Entities, accumulate recurrence across chunks and output for each candidate: canonical name, identity, supporting chunks, significance evidence, and `Page-worthy: yes` or `Page-worthy: no`.",
-  ...ENTITY_ANALYSIS_RULES,
-] as const
-
-export function buildAnalysisPrompt(
-  purpose: string,
-  index: string,
-  sourceContent: string = "",
-  schema: string = "",
-): string {
-  return [
-    "You are an expert research analyst. Read the source document and produce a structured analysis.",
-    "Do not output chain-of-thought, hidden reasoning, or a thinking transcript. Reason internally and write only the concise final analysis.",
-    "",
-    languageRule(sourceContent),
-    "",
-    "Your analysis should cover:",
-    "",
-    "## Key Entities",
-    "List candidate named people, organizations, products, datasets, and tools. For each:",
-    "- Name and type",
-    "- Role and significance in the source",
-    "- Whether it likely already exists in the wiki (check the index)",
-    ...ENTITY_ANALYSIS_RULES,
-    "",
-    "## Key Concepts",
-    "List theories, methods, techniques, phenomena. For each:",
-    "- Name and brief definition",
-    "- Why it matters in this source",
-    "- Whether it likely already exists in the wiki",
-    "",
-    "## Main Arguments & Findings",
-    "- What are the core claims or results?",
-    "- What evidence supports them?",
-    "- How strong is the evidence?",
-    "- Which named subject is each claim about? Do not transfer claims, limits, or evaluations from one entity/model/product/method to another just because they share keywords.",
-    "- Preserve structured source data verbatim in the analysis when present: include SQL DDL / CREATE TABLE statements, schema definitions, API signatures, configuration, and tables in fenced code blocks or Markdown tables. Do not reduce exact field names, types, constraints, keys, or indexes to prose.",
-    "",
-    "## Connections to Existing Wiki",
-    "- What existing pages does this source relate to?",
-    "- Does it strengthen, challenge, or extend existing knowledge?",
-    "",
-    "## Contradictions & Tensions",
-    "- Does anything in this source conflict with existing wiki content?",
-    "- Are there internal tensions or caveats?",
-    "",
-    "## Recommendations",
-    "- What wiki pages should be created or updated?",
-    "- If the project schema (below) defines page types beyond entity/concept (e.g. goal, habit, reflection, finding, decision, meeting), and the source genuinely contains matching content, recommend pages of those types — name the type explicitly. Only when the source actually supports it; never invent goals/habits/journal entries that aren't in the source.",
-    "- What should be emphasized vs. de-emphasized?",
-    "- Any open questions worth flagging for the user?",
-    "",
-    "Be thorough but concise. Focus on what's genuinely important.",
-    "",
-    "If a folder context is provided, use it as a hint for categorization — the folder structure often reflects the user's organizational intent (e.g., 'papers/energy' suggests the file is an energy-related paper).",
-    "",
-    schema
-      ? `## Project Schema (page types available — map source content to schema-defined types when it fits)\n${schema}`
-      : "",
-    purpose ? `## Wiki Purpose (for context)\n${purpose}` : "",
-    index ? `## Current Wiki Index (for checking existing content)\n${index}` : "",
-  ].filter(Boolean).join("\n")
-}
-
-export function buildGenerationPrompt(
-  schema: string,
-  purpose: string,
-  index: string,
-  sourceFileName: string,
-  overview?: string,
-  sourceContent: string = "",
-  sourceSummaryPath?: string,
-): string {
-  // Use original filename (without extension) as the source summary page name
-  const sourceBaseName = sourceFileName.replace(/\.[^.]+$/, "")
-  const summaryPath = sourceSummaryPath ?? `wiki/sources/${sourceBaseName}.md`
+  const targetLang = useWikiStore.getState().outputLanguage
   const today = currentWikiDate()
 
-  return [
-    "You are a wiki maintainer. Based on the analysis provided, generate wiki files.",
-    "Do not output chain-of-thought, hidden reasoning, or explanatory preamble. Reason internally and output only the requested FILE/REVIEW blocks.",
-    "",
-    languageRule(sourceContent),
-    "",
-    `## IMPORTANT: Source File`,
-    `The original source file is: **${sourceFileName}**`,
-    `All wiki pages generated from this source MUST include this filename in their frontmatter \`sources\` field.`,
-    `Today's date is **${today}**. Use this exact date for all new \`created\`, \`updated\`, and wiki/log.md ingest dates.`,
-    "",
-    schema
-      ? [
-          "## Project Schema and Routing (AUTHORITATIVE)",
-          schema,
-          "",
-          "Use this schema as the primary routing rule for page types and directories.",
-          "If it defines custom folders or distinctions (for example people, technologies, organizations, methods, or cases), write pages into those schema-defined folders instead of forcing them into wiki/entities/ or wiki/concepts/.",
-          "Use wiki/entities/ and wiki/concepts/ only when the schema does not provide a more specific destination.",
-          "Every generated page's frontmatter type must match the schema directory used in its FILE path.",
-        ].join("\n")
-      : "",
-    "",
-    "## What to generate",
-    "",
-    `1. A source summary page at **${summaryPath}** (MUST use this exact path)`,
-    "2. Entity or schema-defined typed pages for key named things identified in the analysis. Prefer schema-defined directories when present; otherwise use wiki/entities/.",
-    "3. Concept or schema-defined typed pages for key ideas, methods, techniques, and abstractions. Prefer schema-defined directories when present; otherwise use wiki/concepts/.",
-    "4. A log entry for wiki/log.md (just the new entry to append, format: ## [YYYY-MM-DD] ingest | Title)",
-    ...ENTITY_PAGE_RULES,
-    "For consolidated long-document analyses, the Final Global Digest is authoritative for `Page-worthy` decisions; per-chunk mention notes are evidence, not page-creation instructions.",
-    "Do not generate wiki/index.md or wiki/overview.md. The application maintains aggregate navigation separately so large wikis are never rewritten through model output.",
-    "",
-    "## Frontmatter Rules (CRITICAL — parser is strict)",
-    "",
-    "Every page begins with a YAML frontmatter block. Format rules, in order of importance:",
-    "",
-    "1. The VERY FIRST line of the file MUST be exactly `---` (three hyphens, nothing else).",
-    "   Do NOT wrap the file in a ```yaml ... ``` code fence.",
-    "   Do NOT prefix it with a `frontmatter:` key or any other line.",
-    "2. Each frontmatter line is a `key: value` pair on its own line.",
-    "3. The frontmatter ends with another `---` line on its own.",
-    "4. The next line after the closing `---` is the start of the page body.",
-    "5. Arrays use the standard YAML inline form `[a, b, c]` (no outer brackets around each item).",
-    "   Wikilinks belong in the BODY only — never write `related: [[a]], [[b]]` (invalid YAML);",
-    "   write `related: [a, b]` with bare slugs.",
-    "",
-    "Required fields and types:",
-    `  • type     — one of the known types (${GENERATION_WIKI_TYPES.join(" | ")}), or a custom type explicitly defined by the project schema`,
-    "  • title    — string (quote it if it contains a colon, e.g. `title: \"Foo: Bar\"`)",
-    `  • created  — ${today} for new pages (YYYY-MM-DD, no quotes)`,
-    `  • updated  — ${today} for new pages (same as created)`,
-    "  • tags     — array of bare strings: `tags: [microbiology, ai]`",
-    "  • related  — array of bare wiki page slugs: `related: [foo, bar-baz]`. Do NOT include",
-    "               `wiki/`, `.md`, or `[[…]]` here — slugs only.",
-    `  • sources  — array of source filenames; MUST include "${sourceFileName}".`,
-    "",
-    "Concrete example of a complete, parseable page (everything between the two `---` lines",
-    "is the frontmatter; the heading and prose below are the body):",
-    "",
-    "    ---",
-    "    type: entity",
-    "    title: Example Entity",
-    `    created: ${today}`,
-    `    updated: ${today}`,
-    "    tags: [example, demo]",
-    "    related: [related-slug-1, related-slug-2]",
-    `    sources: ["${sourceFileName}"]`,
-    "    ---",
-    "",
-    "    # Example Entity",
-    "",
-    "    Body content goes here. Use [[wikilink]] syntax in the body for cross-references.",
-    "",
-    "Other rules:",
-    "- Use [[wikilink]] syntax in the BODY for cross-references between pages",
-    "- If you include images, use wiki-root-relative paths such as `media/source-slug/image.png`; never output absolute filesystem paths.",
-    "- Preserve subject boundaries: when a source discusses multiple entities/models/products/methods, keep claims, evaluations, limitations, benchmark results, and recommendations attached to the exact subject they describe.",
-    "- Do not merge or generalize a claim about one subject into another subject's page solely because they share terms (for example context window size, benchmark name, dataset, architecture, or feature name).",
-    "- If a page needs to mention another subject for comparison, write it explicitly as a comparison and cite which source/frontmatter `sources` entry supports that statement.",
-    "- Use kebab-case for Latin-script filenames; for Chinese/Japanese/Korean titles keep the CJK characters (do NOT romanize to pinyin/romaji or translate to English)",
-    "- Derive filenames from the page title in the mandatory output language, but short proper nouns and technical identifiers take precedence: preserve names such as OpenAI, GPT-5, Transformer, CLIP, ImageNet, PyTorch, CUDA, GitHub, arXiv, React, LanceDB, AnyTXT, MinerU, model names, dataset names, tool names, and code identifiers in their standard original form. Do not put raw URLs, citation strings, or full paper titles directly into file paths; convert surrounding descriptive prose to a safe readable title. For Chinese/Japanese/Korean prose titles, keep readable CJK characters in the filename instead of translating the slug to English.",
-    "- Preserve structured source data verbatim: copy SQL DDL / CREATE TABLE statements, schema definitions, API signatures, configuration, and tabular data into fenced code blocks (or Markdown tables) in the source summary page instead of paraphrasing them. Exact column names, types, constraints, primary/foreign keys, and indexes must survive ingest — a prose-only summary that drops them loses the structure the user imported the source to keep.",
-    "- Follow the analysis recommendations on what to emphasize",
-    "- If the analysis found connections to existing pages, add cross-references",
-    "",
-    "## Review block types",
-    "",
-    "After all FILE blocks, optionally emit REVIEW blocks for anything that needs human judgment:",
-    "",
-    "- contradiction: the analysis found conflicts with existing wiki content",
-    "- duplicate: an entity/concept might already exist under a different name in the index",
-    "- missing-page: an important concept is referenced but has no dedicated page",
-    "- suggestion: ideas for further research, related sources to look for, or connections worth exploring",
-    "",
-    "Only create reviews for things that genuinely need human input. Don't create trivial reviews.",
-    "",
-    "## OPTIONS allowed values (only these predefined labels):",
-    "",
-    "- contradiction: OPTIONS: Create Page | Skip",
-    "- duplicate: OPTIONS: Create Page | Skip",
-    "- missing-page: OPTIONS: Create Page | Skip",
-    "- suggestion: OPTIONS: Create Page | Skip",
-    "",
-    "The user also has a 'Deep Research' button (auto-added by the system) that triggers web search.",
-    "Do NOT invent custom option labels. Only use 'Create Page' and 'Skip'.",
-    "",
-    "For suggestion and missing-page reviews, the SEARCH field must contain 2-3 web search queries",
-    "(concise, context-grounded, suitable for a search engine — NOT titles or sentences).",
-    ...PROJECT_LOCAL_TERM_QUERY_RULES,
-    "Example:",
-    "  SEARCH: automated technical debt detection AI generated code | software quality metrics LLM code generation | static analysis tools agentic software development",
-    "",
-    purpose ? `## Wiki Purpose\n${purpose}` : "",
-    index ? `## Current Wiki Index (preserve all existing entries, add new ones)\n${index}` : "",
-    overview ? `## Current Overview (update this to reflect the new source)\n${overview}` : "",
-    "",
-    // ── OUTPUT FORMAT MUST BE THE LAST SECTION — models weight recent instructions highest ──
-    "## Output Format (MUST FOLLOW EXACTLY — this is how the parser reads your response)",
-    "",
-    "Your ENTIRE response consists of FILE blocks followed by optional REVIEW blocks. Nothing else.",
-    "",
-    "FILE block template:",
-    "```",
-    "---FILE: wiki/path/to/page.md---",
-    "(complete file content with YAML frontmatter)",
-    "---END FILE---",
-    "```",
-    "",
-    "REVIEW block template (optional, after all FILE blocks):",
-    "```",
-    "---REVIEW: type | Title---",
-    "Description of what needs the user's attention.",
-    "OPTIONS: Create Page | Skip",
-    "PAGES: wiki/page1.md, wiki/page2.md",
-    "SEARCH: query 1 | query 2 | query 3",
-    "---END REVIEW---",
-    "```",
-    "",
-    "## Output Requirements (STRICT — deviations will cause parse failure)",
-    "",
-    "1. The FIRST character of your response MUST be `-` (the opening of `---FILE:`).",
-    "2. DO NOT output any preamble such as \"Here are the files:\", \"Based on the analysis...\", or any introductory prose.",
-    "3. DO NOT echo or restate the analysis — that was stage 1's job. Your job is to emit FILE blocks.",
-    "4. DO NOT output markdown tables, bullet lists, or headings outside of FILE/REVIEW blocks.",
-    "5. DO NOT output any trailing commentary after the last `---END FILE---` or `---END REVIEW---`.",
-    "6. Between blocks, use only blank lines — no prose.",
-    "7. FILE block prose (body, explanations, descriptions, section text) must use the mandatory output language specified below. Preserve proper nouns, acronyms, model names, dataset names, tool/library names, code identifiers, URLs, file names, citation strings, paper titles, and technical terms with no widely-used localized equivalent in their standard original form, including in page names and section headings.",
-    "",
-    "If you start with anything other than `---FILE:`, the entire response will be discarded.",
-    "",
-    // Repeat the language directive at the very end so it wins the "most
-    // recent instruction" tie-breaker. Small-to-medium models otherwise
-    // drift back to their training-data language for individual pages.
-    "---",
-    "",
-    languageRule(sourceContent),
-  ].filter(Boolean).join("\n")
+  for (const { path: rawRelativePath, content: rawContent } of blocks) {
+    throwIfIngestAborted(signal, activityId)
+    let relativePath = rawRelativePath
+    if (sourceSummaryPath && relativePath.startsWith("wiki/sources/")) {
+      relativePath = sourceSummaryPath
+    }
+    if (isAppManagedAggregatePath(relativePath)) {
+      warnings.push(
+        `Ignored model-generated "${relativePath}"; aggregate navigation is maintained by the application.`,
+      )
+      continue
+    }
+
+    // Sanitize at the boundary — strip stray code-fence wrappers,
+    // `frontmatter:` prefixes, and repair invalid wikilink-list
+    // YAML lines so the file we write is canonical regardless of
+    // what shape the model emitted. See `ingest-sanitize.ts` for
+    // the recurring corruption shapes this fixes; without this
+    // step ~45% of generated entity pages went to disk with
+    // unparseable frontmatter and the read-time fallback had to
+    // paper over it forever.
+    let content = sanitizeIngestedFileContent(rawContent)
+    if (isLogPath(relativePath)) {
+      content = stampGeneratedLogDate(content, today)
+    } else if (!isListingPath(relativePath)) {
+      content = stampGeneratedFrontmatterDates(content, today)
+    }
+    if (!isLogPath(relativePath) && !isListingPath(relativePath)) {
+      content = canonicalizeSourcesField(content, sourceFileName)
+    }
+    if (sourceSummaryPath && relativePath === sourceSummaryPath) {
+      content = sourceSummaryMediaRefsForExternalMarkdown(content)
+    }
+    relativePath = rewriteIngestPathFromTitleForTargetLanguage(relativePath, content, targetLang)
+
+    if (
+      projectSchemaRouting &&
+      !isLogPath(relativePath) &&
+      !isListingPath(relativePath)
+    ) {
+      const correction = correctWikiPageRouting(
+        relativePath,
+        content,
+        projectSchemaRouting,
+      )
+      if (correction.message) {
+        if (!isSafeIngestPath(correction.path)) {
+          const msg = `Dropped "${relativePath}" — corrected schema path was unsafe.`
+          console.warn(`[ingest] ${msg}`)
+          warnings.push(msg)
+          continue
+        }
+        console.info(`[ingest] ${correction.message}`)
+        warnings.push(correction.message)
+        relativePath = correction.path
+      }
+      const routingIssue = validateWikiPageRouting(relativePath, content, projectSchemaRouting)
+      if (routingIssue) {
+        const msg = `Dropped "${relativePath}" — ${routingIssue.message}`
+        console.warn(`[ingest] ${msg}`)
+        warnings.push(msg)
+        continue
+      }
+    }
+
+    // Language guard: reject individual FILE blocks whose body contradicts
+    // the user-set target language. Skip:
+    // - log.md (structural, short)
+    // - /sources/ and /entities/ pages: these legitimately cite cross-
+    //   language proper nouns (a German philosophy source summary naturally
+    //   quotes Russian philosophers) which confuses naive script-based
+    //   detection. Keep the check for /concepts/ pages, which should be
+    //   authoritative content in the target language.
+    const isLog = isLogPath(relativePath)
+    const isEntityOrSource =
+      relativePath.startsWith("wiki/entities/") ||
+      relativePath.includes("/entities/") ||
+      relativePath.startsWith("wiki/sources/") ||
+      relativePath.includes("/sources/")
+    if (
+      targetLang &&
+      targetLang !== "auto" &&
+      !isLog &&
+      !isEntityOrSource &&
+      !contentMatchesTargetLanguage(content, targetLang)
+    ) {
+      const msg = `Dropped "${relativePath}" — body language doesn't match target ${targetLang}.`
+      console.warn(`[ingest] ${msg}`)
+      warnings.push(msg)
+      continue
+    }
+
+    const fullPath = `${projectPath}/${relativePath}`
+    try {
+      if (isLogPath(relativePath)) {
+        const existing = await tryReadFile(fullPath)
+        const appended = existing ? `${existing}\n\n${content.trim()}` : content.trim()
+        await writeFile(fullPath, appended)
+      } else if (
+        isListingPath(relativePath)
+      ) {
+        // Listing pages (index / overview) are always overwritten
+        // wholesale — their sources field is incidental and merging
+        // wouldn't make semantic sense (they aren't source-derived
+        // content pages).
+        await writeFile(fullPath, content)
+      } else {
+        // Content pages (entities / concepts / queries / synthesis /
+        // comparisons / sources summaries): if a page with this
+        // path already exists on disk, merge old + new instead of
+        // clobbering. The merge has three layers:
+        //   1. Frontmatter array fields (sources, tags, related)
+        //      are union-merged at the application layer.
+        //   2. If body content differs, an LLM call produces a
+        //      coherent merged body — preserves contributions from
+        //      every source document.
+        //   3. Locked frontmatter fields (type, title, created)
+        //      are forced back to the existing values; updated is
+        //      stamped today.
+        // LLM failure / sanity rejection falls back to "incoming
+        // body + array-field union" with a best-effort backup.
+        // See page-merge.ts.
+        const existing = await tryReadFile(fullPath)
+        // Re-ingesting a corrected source must replace pages owned solely by
+        // that source. Merging the old body back into the new generation kept
+        // retracted wording alive indefinitely. Multi-source pages still use
+        // the merger because their other sources' contributions must survive.
+        const replaceExistingBody = Boolean(
+          existing && isOwnedOnlyBySource(existing, sourceFileName),
+        )
+        const merged = await mergePageContent(
+          content,
+          existing || null,
+          buildPageMerger(llmConfig),
+          {
+            sourceFileName,
+            pagePath: relativePath,
+            signal,
+            backup: (oldContent) => backupExistingPage(projectPath, relativePath, oldContent),
+            replaceExistingBody,
+          },
+        )
+        // The merge unions existing frontmatter arrays, so sanitize again to
+        // remove legacy/generated paths that may already be stored on disk.
+        const toWrite = canonicalizeSourcesField(merged, sourceFileName)
+        await writeFile(fullPath, toWrite)
+      }
+      writtenPaths.push(relativePath)
+      completedInputPaths.push(rawRelativePath)
+      onFileWritten?.(relativePath)
+    } catch (err) {
+      const msg = `Failed to write "${relativePath}": ${err instanceof Error ? err.message : String(err)}`
+      console.error(`[ingest] ${msg}`)
+      warnings.push(msg)
+      hardFailures.push(relativePath)
+    }
+  }
+
+  return {
+    writtenPaths,
+    completedInputPaths,
+    warnings,
+    hardFailures,
+    truncatedPaths,
+  }
 }
 
-export function buildReviewSuggestionPrompt(
-  purpose: string,
-  index: string,
-  sourceIdentity: string,
-  analysis: string,
-  sourceContext: string,
-  generation: string,
-  maxContextSize: number | undefined,
-): string {
-  const { maxCtx } = computeContextBudget(maxContextSize)
-  const sectionCap = Math.max(4_000, Math.floor(maxCtx * 0.15))
-  const indexCap = Math.max(3_000, Math.floor(sectionCap * 0.8))
-  return [
-    "You are identifying high-value follow-up research items for a personal wiki.",
-    "Do not output chain-of-thought, hidden reasoning, or explanatory preamble.",
-    "",
-    languageRule(sourceContext),
-    "",
-    "Your job is NOT to generate wiki pages. The wiki page generation already happened.",
-    "Output only REVIEW blocks for unresolved knowledge gaps that deserve human attention or Deep Research.",
-    "",
-    "Create REVIEW blocks only for genuinely useful follow-up work:",
-    "- missing-page: an important entity/concept is referenced but still lacks a dedicated page",
-    "- suggestion: a research question, source type, or comparison that would materially improve the wiki",
-    "- contradiction: a conflict or tension that requires user judgment",
-    "- duplicate: likely duplicate pages/names that need user review",
-    "",
-    "Prefer 1-5 high-signal reviews. If there is nothing worth reviewing, output nothing.",
-    "For suggestion and missing-page reviews, include a SEARCH line with 2-3 context-grounded web search queries separated by ` | `.",
-    ...PROJECT_LOCAL_TERM_QUERY_RULES,
-    "Use only these options: OPTIONS: Create Page | Skip",
-    "",
-    "REVIEW block template:",
-    "```",
-    "---REVIEW: suggestion | Precise title---",
-    "Concise description of the gap and why it matters.",
-    "OPTIONS: Create Page | Skip",
-    "PAGES: wiki/page1.md, wiki/page2.md",
-    "SEARCH: query 1 | query 2 | query 3",
-    "---END REVIEW---",
-    "```",
-    "",
-    "Return REVIEW blocks only. Do not output FILE blocks. Do not wrap the response in markdown fences.",
-    "",
-    purpose ? `## Wiki Purpose\n${purpose}` : "",
-    index ? `## Current Wiki Index\n${trimLongText(index, indexCap)}` : "",
-    "",
-    `## Source\n${sourceIdentity}`,
-    "",
-    "## Stage 1 Analysis",
-    trimLongText(analysis, sectionCap),
-    "",
-    "## Source Context",
-    trimLongText(sourceContext, sectionCap),
-    "",
-    "## Generated Wiki Output",
-    trimLongText(generation, sectionCap),
-  ].filter(Boolean).join("\n")
+function isOwnedOnlyBySource(content: string, sourceIdentity: string): boolean {
+  const sources = parseSources(content)
+  if (sources.length === 0) return false
+  const expected = sourceReferenceIdentity(sourceIdentity).toLowerCase()
+  return sources.every(
+    (source) => sourceReferenceIdentity(source).toLowerCase() === expected,
+  )
 }
-
-type TruncatedFileRepairContext = {
-  readonly schema: string
-  readonly purpose: string
-  readonly analysis: string
-  readonly sourceContext: string
-  readonly maxContextSize: number | undefined
-}
-
-function buildTruncatedFileRepairPrompt(
-  paths: readonly string[],
-  sourceIdentity: string,
-  context: TruncatedFileRepairContext,
-): string {
-  const { schema, purpose, analysis, sourceContext, maxContextSize } = context
-  const { maxCtx } = computeContextBudget(maxContextSize)
-  const sectionCap = Math.max(4_000, Math.floor(maxCtx * 0.12))
-  return [
-    "You are repairing truncated wiki FILE blocks from an earlier generation.",
-    "Return exactly one complete FILE block for each requested path and no other files.",
-    "Every block must end with `---END FILE---`. Do not output a preamble, REVIEW blocks, or trailing commentary.",
-    "Preserve the requested paths exactly and include the source identity in each page's frontmatter `sources` field.",
-    "",
-    languageRule(sourceContext),
-    "",
-    "## Requested paths",
-    ...paths.map((path) => `- ${path}`),
-    "",
-    `## Source identity\n${sourceIdentity}`,
-    schema ? `## Project schema\n${trimLongText(schema, sectionCap)}` : "",
-    purpose ? `## Wiki purpose\n${trimLongText(purpose, sectionCap)}` : "",
-    `## Stage 1 analysis\n${trimLongText(analysis, sectionCap)}`,
-    `## Source context\n${trimLongText(sourceContext, sectionCap)}`,
-  ].filter(Boolean).join("\n")
-}
-
-export function filterTruncatedFileRepairOutput(
-  text: string,
-  allowedPaths: readonly string[],
-): { text: string; paths: string[]; warnings: string[] } {
 
 function uniqueNormalizedPaths(paths: readonly string[]): string[] {
   const seen = new Set<string>()
@@ -2312,434 +1662,15 @@ async function tryReadSourceTextFile(path: string): Promise<string> {
   }
 }
 
-function clampNumber(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value))
-}
-
-export function computeIngestSourceBudget(
-  maxContextSize: number | undefined,
-  stableContextLength: number,
-): number {
-  const { maxCtx, responseReserve } = computeContextBudget(maxContextSize)
-  const stableReserve = Math.min(Math.floor(maxCtx * 0.25), Math.max(12_000, stableContextLength))
-  const instructionReserve = Math.max(12_000, Math.floor(maxCtx * 0.08))
-  const available = maxCtx - responseReserve - stableReserve - instructionReserve
-  const upper = Math.min(LONG_SOURCE_MAX_SINGLE_PASS_BUDGET, Math.max(LONG_SOURCE_MIN_BUDGET, Math.floor(maxCtx * 0.6)))
-  return clampNumber(Math.floor(available), LONG_SOURCE_MIN_BUDGET, upper)
-}
-
-export function computeIngestGenerationMaxTokens(maxContextSize: number | undefined): number {
-  const { maxCtx } = computeContextBudget(maxContextSize)
-  if (maxCtx >= 512_000) return INGEST_GENERATION_TOKENS_512K
-  if (maxCtx >= 256_000) return INGEST_GENERATION_TOKENS_256K
-  if (maxCtx >= 128_000) return INGEST_GENERATION_TOKENS_128K
-  return INGEST_GENERATION_TOKENS_DEFAULT
-}
-
-export function computeIngestReviewMaxTokens(maxContextSize: number | undefined): number {
-  return Math.min(8_192, Math.max(4_096, Math.floor(computeIngestGenerationMaxTokens(maxContextSize) / 2)))
-}
-
-function semanticBlocks(content: string, targetChars: number): Array<{ text: string; headingPath: string }> {
-
-function overlapSuffix(text: string, maxChars: number): string {
-  if (!text || maxChars <= 0) return ""
-  if (text.length <= maxChars) return text
-  const raw = text.slice(-maxChars)
-  const paragraphBreak = raw.search(/\n\s*\n/)
-  if (paragraphBreak > 0 && raw.length - paragraphBreak > maxChars * 0.4) {
-    return raw.slice(paragraphBreak).trim()
-  }
-  const sentenceBreak = raw.search(/[.!?。！？]\s+/)
-  if (sentenceBreak > 0 && raw.length - sentenceBreak > maxChars * 0.4) {
-    return raw.slice(sentenceBreak + 1).trim()
-  }
-  return raw.trim()
-}
-
-export function splitSourceIntoSemanticChunks(
-  content: string,
-  targetChars: number,
-  overlapChars: number,
-): SourceChunk[] {
-  const target = Math.max(1_000, targetChars)
-  const blocks = semanticBlocks(content, target)
-  if (blocks.length === 0) return []
-
-  const rawChunks: Array<{ main: string; headingPath: string }> = []
-  let current: string[] = []
-  let currentLength = 0
-  let currentHeading = blocks[0]?.headingPath ?? ""
-
-  const flush = () => {
-    const main = current.join("\n\n").trim()
-    if (main) rawChunks.push({ main, headingPath: currentHeading })
-    current = []
-    currentLength = 0
-  }
-
-  for (const block of blocks) {
-    const nextLength = currentLength + block.text.length + (current.length > 0 ? 2 : 0)
-    if (current.length > 0 && nextLength > target) {
-      flush()
-    }
-    if (current.length === 0) currentHeading = block.headingPath
-    current.push(block.text)
-    currentLength += block.text.length + (current.length > 1 ? 2 : 0)
-  }
-  flush()
-
-  return rawChunks.map((chunk, idx) => ({
-    id: `chunk-${idx + 1}`,
-    index: idx + 1,
-    total: rawChunks.length,
-    headingPath: chunk.headingPath,
-    overlapBefore: idx > 0 ? overlapSuffix(rawChunks[idx - 1].main, overlapChars) : "",
-    main: chunk.main,
-  }))
-}
-
-function trimLongText(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text
-  return `${text.slice(0, maxChars).trimEnd()}\n\n[...trimmed for prompt budget...]`
-}
-
-function trimInlineStatus(text: string, maxChars = 240): string {
-  return text.length <= maxChars ? text : `${text.slice(0, maxChars).trimEnd()}...`
-}
-
-function hashTextHex(text: string): string {
-  // 64-bit FNV-1a over UTF-16 code units. This is a stability key, not
-  // a security primitive; validation also checks source length/chunk
-  // shape before resuming a checkpoint.
-  let hash = 0xcbf29ce484222325n
-  const prime = 0x100000001b3n
-  for (let i = 0; i < text.length; i++) {
-    hash ^= BigInt(text.charCodeAt(i))
-    hash = BigInt.asUintN(64, hash * prime)
-  }
-  return hash.toString(16).padStart(16, "0")
-}
-
-function longSourceCheckpointPath(
+async function backupExistingPage(
   projectPath: string,
-  sourceSummarySlug: string,
-  sourceHash: string,
-): string {
-  return `${normalizePath(projectPath)}/.llm-wiki/ingest-progress/${sourceSummarySlug}-${sourceHash}.json`
-}
-
-function generationCheckpointPath(
-  projectPath: string,
-  sourceSummarySlug: string,
-  sourceFingerprint: string,
-): string {
-  return `${normalizePath(projectPath)}/.llm-wiki/ingest-generation/${sourceSummarySlug}-${sourceFingerprint}.json`
-}
-
-async function sourceGenerationFingerprint(sourcePath: string, sourceContent: string): Promise<string> {
-  const [modified, size] = await Promise.all([
-    getFileModifiedTime(sourcePath).catch(() => 0),
-    getFileSize(sourcePath).catch(() => 0),
-  ])
-  return hashTextHex(`${sourceContent}\0${modified}\0${size}`)
-}
-
-async function loadGenerationCheckpoint(
-  checkpointPath: string,
-  sourceIdentity: string,
-  sourceFingerprint: string,
-  projectPath: string,
-): Promise<GenerationCheckpoint | null> {
-  try {
-    const parsed = JSON.parse(await readFile(checkpointPath)) as GenerationCheckpoint
-    if (
-      parsed.version !== 1 ||
-      parsed.sourceIdentity !== sourceIdentity ||
-      parsed.sourceFingerprint !== sourceFingerprint ||
-      !Array.isArray(parsed.completedPaths)
-    ) return null
-    const completedPaths: string[] = []
-    for (const path of uniqueNormalizedPaths(parsed.completedPaths)) {
-      if (isSafeIngestPath(path) && await fileExists(`${projectPath}/${path}`)) {
-        completedPaths.push(path)
-      }
-    }
-    return { ...parsed, completedPaths }
-  } catch {
-    return null
-  }
-}
-
-async function saveGenerationCheckpoint(
-  checkpointPath: string,
-  checkpoint: GenerationCheckpoint,
+  relativePath: string,
+  existingContent: string,
 ): Promise<void> {
-  await createDirectory(checkpointPath.split("/").slice(0, -1).join("/"))
-  await writeFile(checkpointPath, JSON.stringify(checkpoint, null, 2))
-}
-
-async function clearGenerationCheckpoint(checkpointPath: string): Promise<void> {
-  try {
-    if (await fileExists(checkpointPath)) await deleteFile(checkpointPath)
-  } catch {
-    // Best-effort cleanup; a completed checkpoint is harmless because the
-    // ingest cache short-circuits subsequent unchanged-source runs.
-  }
-}
-
-function isCompatibleLongSourceCheckpoint(
-  checkpoint: LongSourceCheckpoint,
-  params: {
-    sourceIdentity: string
-    sourceHash: string
-    sourceLength: number
-    sourceBudget: number
-    targetChars: number
-    overlapChars: number
-    chunkTotal: number
-  },
-
-async function loadLongSourceCheckpoint(
-  checkpointPath: string,
-  params: Parameters<typeof isCompatibleLongSourceCheckpoint>[1],
-): Promise<LongSourceCheckpoint | null> {
-  try {
-    const raw = await readFile(checkpointPath)
-    const parsed = JSON.parse(raw) as LongSourceCheckpoint
-    if (!isCompatibleLongSourceCheckpoint(parsed, params)) return null
-    return parsed
-  } catch {
-    return null
-  }
-}
-
-async function saveLongSourceCheckpoint(
-  checkpointPath: string,
-  checkpoint: LongSourceCheckpoint,
-): Promise<void> {
-  const dir = checkpointPath.split("/").slice(0, -1).join("/")
-  await createDirectory(dir)
-  await writeFile(checkpointPath, JSON.stringify(checkpoint, null, 2))
-}
-
-async function clearLongSourceCheckpoint(checkpointPath: string): Promise<void> {
-  try {
-    if (await fileExists(checkpointPath)) {
-      await deleteFile(checkpointPath)
-    }
-  } catch {
-    // Best-effort cleanup. A stale checkpoint is ignored if source
-    // hash / chunk shape no longer matches.
-  }
-}
-
-function extractMarkedSection(raw: string, heading: string): string {
-  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  const re = new RegExp(`(?:^|\\n)##\\s+${escaped}\\s*\\n([\\s\\S]*?)(?=\\n##\\s|$)`, "i")
-  return re.exec(raw)?.[1]?.trim() ?? ""
-}
-
-export function buildChunkAnalysisSystemPrompt(
-  purpose: string,
-  schema: string,
-  index: string,
-  sourceContent: string,
-): string {
-  return [
-    "You are analyzing a long source document for a personal wiki.",
-    "Do not output chain-of-thought, hidden reasoning, or a thinking transcript.",
-    "Analyze only the current MAIN CHUNK. Use overlap and digest for context only.",
-    "Keep stable names consistent with the existing wiki and prior digest.",
-    "",
-    languageRule(sourceContent),
-    "",
-    "Output exactly two markdown sections:",
-    "",
-    "## Chunk Analysis",
-    "- Concise summary of the main chunk",
-    "- New or updated entities",
-    "- New or updated concepts",
-    "- Any schema-defined page types beyond entity/concept that the main chunk genuinely supports",
-    "- Claims, findings, evidence, contradictions",
-    "- Exact structured data from this chunk, when present: preserve SQL DDL / CREATE TABLE statements, schema definitions, API signatures, configuration, and tables verbatim in fenced code blocks or Markdown tables; retain field names, types, constraints, keys, and indexes",
-    "- Open questions or research gaps",
-    "",
-    "## Updated Global Digest",
-    "A compact document-level digest that incorporates this chunk and preserves prior cross-chunk context.",
-    "Keep this digest structured under: Summary, Entities, Concepts, Schema-Typed Candidates, Claims, Evidence, Contradictions, Open Questions, Cross-Chunk Relations.",
-    "Entity handling rules:",
-    ...LONG_SOURCE_ENTITY_RULES.map((rule) => `- ${rule}`),
-    "Use schema-defined types only when the source actually supports them; never invent goals, habits, journal entries, decisions, or similar user-authored records that are not present in the source.",
-    "",
-    "Stable project context follows. It changes rarely and should be treated as background:",
-    purpose ? `## Wiki Purpose\n${purpose}` : "",
-    schema ? `## Wiki Schema\n${schema}` : "",
-    index ? `## Current Wiki Index\n${trimLongText(index, 40_000)}` : "",
-  ].filter(Boolean).join("\n")
-}
-
-function buildChunkAnalysisUserPrompt(
-  sourceIdentity: string,
-  folderContext: string | undefined,
-  chunk: SourceChunk,
-  globalDigest: string,
-): string {
-  return [
-    `Source file: ${sourceIdentity}`,
-    folderContext ? `Folder context: ${folderContext}` : "",
-    `Chunk: ${chunk.index}/${chunk.total}`,
-    chunk.headingPath ? `Heading path: ${chunk.headingPath}` : "",
-    "",
-    "## Current Global Digest",
-    globalDigest || "(No prior digest yet.)",
-    "",
-    chunk.overlapBefore ? "## Previous Overlap Context\n" + chunk.overlapBefore : "",
-    "",
-    "## MAIN CHUNK TO ANALYZE",
-    chunk.main,
-    "",
-    "Return only the two requested sections. Do not repeat overlap-only facts unless the main chunk supports them.",
-  ].filter(Boolean).join("\n")
-}
-
-async function analyzeLongSourceInChunks(
-  projectPath: string,
-  llmConfig: LlmConfig,
-  purpose: string,
-  schema: string,
-  index: string,
-  sourceIdentity: string,
-  sourceSummarySlug: string,
-  folderContext: string | undefined,
-  sourceContent: string,
-  sourceBudget: number,
-  activityId: string,
-  signal?: AbortSignal,
-): Promise<LongSourcePlan> {
-  const targetChars = clampNumber(Math.floor(sourceBudget * 0.55), LONG_SOURCE_CHUNK_MIN, LONG_SOURCE_CHUNK_MAX)
-  const overlapChars = clampNumber(Math.floor(targetChars * 0.08), 800, 3_000)
-  const chunks = splitSourceIntoSemanticChunks(sourceContent, targetChars, overlapChars)
-  if (chunks.length <= 1) {
-    return { chunked: false, analysis: "", sourceContext: sourceContent }
-  }
-
-  const activity = useActivityStore.getState()
-  const systemPrompt = buildChunkAnalysisSystemPrompt(purpose, schema, index, sourceContent)
-  const sourceHash = hashTextHex(sourceContent)
-  const checkpointPath = longSourceCheckpointPath(projectPath, sourceSummarySlug, sourceHash)
-  const checkpointParams = {
-    sourceIdentity,
-    sourceHash,
-    sourceLength: sourceContent.length,
-    sourceBudget,
-    targetChars,
-    overlapChars,
-    chunkTotal: chunks.length,
-  }
-  const checkpoint = await loadLongSourceCheckpoint(checkpointPath, checkpointParams)
-  let globalDigest = checkpoint?.globalDigest ?? ""
-  const analyses: string[] = checkpoint?.analyses ? [...checkpoint.analyses] : []
-  let completedThrough = checkpoint?.completedThrough ?? 0
-
-  if (completedThrough > 0) {
-    activity.updateItem(activityId, {
-      detail: `Resuming long source analysis from chunk ${completedThrough + 1}/${chunks.length}...`,
-    })
-  }
-
-  const analysisRequest = ingestAnalysisRequest(llmConfig)
-  for (const chunk of chunks) {
-    if (chunk.index <= completedThrough) continue
-    throwIfIngestAborted(signal, activityId)
-    activity.updateItem(activityId, {
-      detail: `Analyzing long source chunk ${chunk.index}/${chunk.total}...`,
-    })
-
-    let raw = ""
-    let hadError = false
-    let analysisTruncated = false
-    await streamChat(
-      llmConfig,
-      [
-        { role: "system", content: systemPrompt },
-        {
-          role: "user",
-          content: buildChunkAnalysisUserPrompt(
-            sourceIdentity,
-            folderContext,
-            chunk,
-            trimLongText(globalDigest, LONG_SOURCE_DIGEST_MAX),
-          ),
-        },
-      ],
-      {
-        onToken: (token) => { raw += token },
-        onDone: (completion) => { analysisTruncated = completion?.truncated === true },
-        onError: (err) => {
-          hadError = true
-          activity.updateItem(activityId, { status: "error", detail: `Chunk analysis failed: ${err.message}` })
-        },
-      },
-      signal,
-      { temperature: 0.1, reasoning: analysisRequest.reasoning, max_tokens: analysisRequest.maxTokens },
-    )
-
-    throwIfIngestAborted(signal, activityId)
-    if (hadError) throw new Error("Chunk analysis stream failed")
-    if (analysisTruncated) {
-      const message =
-        `Chunk ${chunk.index}/${chunk.total} analysis was truncated after reaching the ` +
-        `${analysisRequest.maxTokens.toLocaleString()} token output limit; the saved checkpoint will be retried`
-      activity.updateItem(activityId, { status: "error", detail: message })
-      throw new Error(message)
-    }
-
-    const chunkAnalysis = extractMarkedSection(raw, "Chunk Analysis") || raw.trim()
-    const nextDigest = extractMarkedSection(raw, "Updated Global Digest")
-    analyses.push([
-      `## Chunk ${chunk.index}/${chunk.total}${chunk.headingPath ? ` — ${chunk.headingPath}` : ""}`,
-      trimLongText(chunkAnalysis, LONG_SOURCE_CHUNK_ANALYSIS_MAX),
-    ].join("\n"))
-
-    globalDigest = trimLongText(
-      nextDigest || [globalDigest, chunkAnalysis].filter(Boolean).join("\n\n"),
-      LONG_SOURCE_DIGEST_MAX,
-    )
-    completedThrough = chunk.index
-    await saveLongSourceCheckpoint(checkpointPath, {
-      version: 1,
-      ...checkpointParams,
-      completedThrough,
-      globalDigest,
-      analyses,
-      updatedAt: Date.now(),
-    })
-  }
-
-  const analysis = [
-    "# Consolidated Long-Document Analysis",
-    "",
-    "## Final Global Digest",
-    globalDigest || "(No digest produced.)",
-    "",
-    "## Per-Chunk Analyses",
-    analyses.join("\n\n"),
-  ].join("\n")
-
-  const sourceContext = [
-    `# Long Source Context: ${sourceIdentity}`,
-    "",
-    `The original source was analyzed in ${chunks.length} semantic chunks with paragraph/section boundaries and overlap. Use this consolidated context instead of assuming the raw document ended early.`,
-    "",
-    "## Final Global Digest",
-    globalDigest || "(No digest produced.)",
-    "",
-    "## Chunk Analysis Notes",
-    trimLongText(analyses.join("\n\n"), Math.max(sourceBudget, LONG_SOURCE_CHUNK_ANALYSIS_MAX)),
-  ].join("\n")
-
-  return { chunked: true, analysis, sourceContext, checkpointPath }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-")
+  const sanitized = relativePath.replace(/[/\\]/g, "_")
+  const backupPath = `${projectPath}/.llm-wiki/page-history/${sanitized}-${stamp}`
+  await writeFile(backupPath, existingContent)
 }
 
 async function injectImagesIntoSourceSummary(
@@ -2747,6 +1678,72 @@ async function injectImagesIntoSourceSummary(
   sourceIdentity: string,
   sourceSummarySlug: string,
   savedImages: { relPath: string; page: number | null; sha256?: string }[],
+  outputLanguage?: string,
+): Promise<void> {
+  if (savedImages.length === 0) return
+  const sourceSummaryPath = `wiki/sources/${sourceSummarySlug}.md`
+  const sourceSummaryFullPath = `${pp}/${sourceSummaryPath}`
+  console.log(`[ingest:diag] injectImagesIntoSourceSummary: target=${sourceSummaryFullPath}, images=${savedImages.length}`)
+  try {
+    const existing = await tryReadFile(sourceSummaryFullPath)
+    console.log(`[ingest:diag] injectImagesIntoSourceSummary: existing file ${existing ? `read OK (${existing.length} chars)` : "MISSING (will write stub)"}`)
+    // Load captions from the on-disk cache so the safety-net
+    // section embeds caption text as alt — the embedding pipeline
+    // indexes whatever's in the wiki page, so without this, search
+    // by image content (e.g. "find the chart with revenue data")
+    // never matches because alt text was empty.
+    const captionsBySha = await loadCaptionCache(pp, outputLanguage)
+    const newSection = buildImageMarkdownSection(
+      savedImages.map((img) => ({
+        ...img,
+        relPath: toSourceSummaryImageRef(img.relPath),
+      })) as never,
+      captionsBySha,
+    )
+    const marker = "<!-- llm-wiki:embedded-images -->"
+    const wrapped = `\n\n${marker}\n${newSection.trim()}\n${marker}\n`
+    if (existing) {
+      // Strip any prior injection (paired markers) so re-ingest
+      // doesn't accumulate stale references when images change.
+      const stripped = existing.replace(
+        new RegExp(`\\n*${marker}[\\s\\S]*?${marker}\\n*`, "g"),
+        "",
+      )
+      await writeFile(sourceSummaryFullPath, stripped.trimEnd() + wrapped)
+    } else {
+      // Page is missing — write a minimal stub so the user actually
+      // sees the images in the file tree. Without this fallback, the
+      // images sit in wiki/media/<slug>/ with no .md page referencing
+      // them, which means the lint view's orphan-page sweep eventually
+      // reaps the media directory (cascadeDeleteWikiPage triggered by
+      // a missing source page) — silent loss of extracted images.
+      const date = new Date().toISOString().slice(0, 10)
+      const stubFrontmatter = [
+        "---",
+        "type: source",
+        `title: "Source: ${sourceIdentity}"`,
+        `created: ${date}`,
+        `updated: ${date}`,
+        `sources: ["${sourceIdentity}"]`,
+        "tags: []",
+        "related: []",
+        "---",
+        "",
+        `# Source: ${sourceIdentity}`,
+        "",
+      ].join("\n")
+      await writeFile(sourceSummaryFullPath, stubFrontmatter + wrapped)
+    }
+    console.log(
+      `[ingest:images] injected ${savedImages.length} image reference(s) into ${sourceSummaryPath}`,
+    )
+  } catch (err) {
+    console.warn(
+      `[ingest:images] failed to append images to ${sourceSummaryPath}:`,
+      err instanceof Error ? err.message : err,
+    )
+  }
+}
 
 async function reembedSourceSummary(
   pp: string,
@@ -2802,7 +1799,7 @@ export async function startIngest(
   // Failure-tolerant — `extractAndSaveSourceImages` returns [] on
   // any error and logs internally; we never want image extraction
   // to break the ingest chat flow.
-  void extractSourceImagesOnce(pp, sp, sourceSummarySlug).catch((err) => {
+  void extractSourceImagesOnce(pp, sp, sourceSummarySlug).catch((err: unknown) => {
     console.warn(
       `[startIngest:images] eager extraction failed for "${getFileName(sp)}":`,
       err instanceof Error ? err.message : err,
