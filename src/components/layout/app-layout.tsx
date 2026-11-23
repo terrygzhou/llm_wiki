@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useWikiStore } from "@/stores/wiki-store"
-import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
+import { refreshProjectFileTree } from "@/lib/tauri/project-file-tree-refresh"
 import { IconSidebar } from "./icon-sidebar"
 import { UpdateBanner } from "./update-banner"
 import { SidebarPanel } from "./sidebar-panel"

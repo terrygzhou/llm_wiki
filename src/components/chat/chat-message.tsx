@@ -19,24 +19,24 @@ import { lastQueryPages } from "@/components/chat/chat-panel"
 import type { DisplayMessage, MessageReference } from "@/stores/chat-store"
 import type { FileNode } from "@/types/wiki"
 
-import { convertLatexToUnicode } from "@/lib/latex-to-unicode"
-import { normalizePath, getFileName, isAbsolutePath } from "@/lib/path-utils"
-import { makeQueryFileName } from "@/lib/wiki-filename"
-import { hasUsableLlm } from "@/lib/has-usable-llm"
-import { getTaskLlmConfig } from "@/lib/llm-task-routing"
-import { messageImageToDataUrl } from "@/lib/chat-image-utils"
-import { resolveMarkdownImageSrc } from "@/lib/markdown-image-resolver"
-import { transformImageEmbeds } from "@/lib/wikilink-transform"
-import { findRawSourceForImage, imageUrlToAbsolute } from "@/lib/raw-source-resolver"
-import { detectLanguage } from "@/lib/detect-language"
-import { getHtmlLang, getTextDirection } from "@/lib/language-metadata"
+import { convertLatexToUnicode } from "@/lib/i18n-support/latex-to-unicode"
+import { normalizePath, getFileName, isAbsolutePath } from "@/lib/utils/path-utils"
+import { makeQueryFileName } from "@/lib/utils/wiki-filename"
+import { hasUsableLlm } from "@/lib/chat/has-usable-llm"
+import { getTaskLlmConfig } from "@/lib/chat/llm-task-routing"
+import { messageImageToDataUrl } from "@/lib/chat/chat-image-utils"
+import { resolveMarkdownImageSrc } from "@/lib/utils/markdown-image-resolver"
+import { transformImageEmbeds } from "@/lib/ingest/wikilink-transform"
+import { findRawSourceForImage, imageUrlToAbsolute } from "@/lib/utils/raw-source-resolver"
+import { detectLanguage } from "@/lib/i18n-support/detect-language"
+import { getHtmlLang, getTextDirection } from "@/lib/i18n-support/language-metadata"
 import { MermaidDiagram, unwrapMermaidPre } from "@/components/mermaid-diagram"
-import { inferWikiTypeFromPath } from "@/lib/wiki-page-types"
-import { cleanAssistantContentForWikiSave, titleFromCleanAssistantContent } from "@/lib/chat-save-to-wiki"
-import type { ChatAgentEvent, ChatAgentEventStage, ChatAgentStep, ChatUserInputField, ChatUserInputRequest } from "@/lib/chat-agent-types"
-import { filterRawSourceTree } from "@/lib/source-filter"
-import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
-import { getFileCategory, getFileExtension, isTextReadable } from "@/lib/file-types"
+import { inferWikiTypeFromPath } from "@/lib/utils/wiki-page-types"
+import { cleanAssistantContentForWikiSave, titleFromCleanAssistantContent } from "@/lib/chat/chat-save-to-wiki"
+import type { ChatAgentEvent, ChatAgentEventStage, ChatAgentStep, ChatUserInputField, ChatUserInputRequest } from "@/lib/chat/chat-agent-types"
+import { filterRawSourceTree } from "@/lib/utils/source-filter"
+import { refreshProjectFileTree } from "@/lib/tauri/project-file-tree-refresh"
+import { getFileCategory, getFileExtension, isTextReadable } from "@/lib/utils/file-types"
 import { AgentFileActivity } from "@/components/chat/agent-file-activity"
 import { ReferenceKnowledgeGraph } from "@/components/chat/reference-knowledge-graph"
 
@@ -619,7 +619,7 @@ function SaveToWikiButton({ content, visible }: { content: string; visible: bool
       // Full auto-ingest: extract entities, concepts, cross-references from saved content
       const llmConfig = getTaskLlmConfig("ingest")
       if (hasUsableLlm(llmConfig)) {
-        const { autoIngest } = await import("@/lib/ingest")
+        const { autoIngest } = await import("@/lib/ingest/ingest")
         autoIngest(pp, filePath, llmConfig).catch((err) =>
           console.error("Failed to auto-ingest saved query:", err)
         )

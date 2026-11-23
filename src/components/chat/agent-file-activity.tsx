@@ -2,11 +2,11 @@ import { useMemo, useState } from "react"
 import { ChevronDown, ChevronRight, FilePlus2, FileText, RotateCcw } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { deleteFile, readFile, writeFile } from "@/commands/fs"
-import type { ChatAgentFileChange } from "@/lib/chat-agent-types"
-import { getFileName } from "@/lib/path-utils"
-import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
+import type { ChatAgentFileChange } from "@/lib/chat/chat-agent-types"
+import { getFileName } from "@/lib/utils/path-utils"
+import { refreshProjectFileTree } from "@/lib/tauri/project-file-tree-refresh"
 import { useWikiStore } from "@/stores/wiki-store"
-import { groupAgentFileChanges } from "@/lib/agent-file-activity"
+import { groupAgentFileChanges } from "@/lib/utils/agent-file-activity"
 
 export function AgentFileActivity({
   changes,

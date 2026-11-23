@@ -5,8 +5,8 @@ import type { SettingsDraft, DraftSetter } from "../settings-types"
 import {
   normalizeSourceWatchConfig,
   SOURCE_WATCH_FILE_TYPE_GROUPS,
-} from "@/lib/source-watch-config"
-import { MAX_USER_CONCURRENCY } from "@/lib/concurrency-limits"
+} from "@/lib/tauri/source-watch-config"
+import { MAX_USER_CONCURRENCY } from "@/lib/chat/concurrency-limits"
 
 interface Props {
   draft: SettingsDraft

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest"
-import type { LintResult } from "@/lib/lint"
+import type { LintResult } from "@/lib/utils/lint"
 import { useLintStore, type LintItem } from "./lint-store"
 
 function makeLintResult(overrides: Partial<Omit<LintResult, "type" | "severity" | "page" | "detail">> & { type?: LintResult["type"]; severity?: LintResult["severity"]; page?: string } = {}): LintResult {

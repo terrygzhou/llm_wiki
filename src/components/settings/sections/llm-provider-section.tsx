@@ -9,12 +9,12 @@ import { useWikiStore, type LlmConfig, type ProviderOverride, type ReasoningConf
 import { availableLlmPresets, findLlmPreset, type LlmPreset } from "../llm-presets"
 import { ContextSizeSelector } from "../context-size-selector"
 import { disabledLlmConfig, resolveConfig } from "../preset-resolver"
-import { normalizeEndpoint } from "@/lib/endpoint-normalizer"
-import { AZURE_OPENAI_API_VERSION } from "@/lib/azure-openai"
-import { testLlmConnection, testLlmFunction, type ProviderTestResult } from "@/lib/connection-tests"
-import { projectLlmProfile, resolveProjectLlmConfig } from "@/lib/llm-task-routing"
-import { saveProjectLlmOverride } from "@/lib/project-store"
-import { normalizeReasoningForProvider, resolveReasoningCapabilities } from "@/lib/reasoning-capabilities"
+import { normalizeEndpoint } from "@/lib/chat/endpoint-normalizer"
+import { AZURE_OPENAI_API_VERSION } from "@/lib/chat/azure-openai"
+import { testLlmConnection, testLlmFunction, type ProviderTestResult } from "@/lib/chat/connection-tests"
+import { projectLlmProfile, resolveProjectLlmConfig } from "@/lib/chat/llm-task-routing"
+import { saveProjectLlmOverride } from "@/lib/utils/project-store"
+import { normalizeReasoningForProvider, resolveReasoningCapabilities } from "@/lib/chat/reasoning-capabilities"
 
 const HTTP_HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
 
@@ -63,7 +63,7 @@ export function LlmProviderSection() {
 
   async function persist(newConfigs: typeof providerConfigs, newActive: string | null) {
     const { saveProviderConfigs, saveActivePresetId, saveLlmConfig } = await import(
-      "@/lib/project-store"
+      "@/lib/utils/project-store"
     )
     await saveProviderConfigs(newConfigs)
     await saveActivePresetId(newActive)
@@ -121,7 +121,7 @@ export function LlmProviderSection() {
       [task === "chat" ? "chatPresetId" : "ingestPresetId"]: value || null,
     }
     setTaskModelRouting(next)
-    const { saveTaskModelRouting } = await import("@/lib/project-store")
+    const { saveTaskModelRouting } = await import("@/lib/utils/project-store")
     await saveTaskModelRouting(next)
   }
 
@@ -137,7 +137,7 @@ export function LlmProviderSection() {
     }]
     setCustomLlmPresets(next)
     setExpanded((current) => ({ ...current, [id]: true }))
-    const { saveCustomLlmPresets } = await import("@/lib/project-store")
+    const { saveCustomLlmPresets } = await import("@/lib/utils/project-store")
     await saveCustomLlmPresets(next)
   }
 
@@ -147,7 +147,7 @@ export function LlmProviderSection() {
     const next = useWikiStore.getState().customLlmPresets
       .map((preset) => preset.id === id ? { ...preset, label: trimmed.slice(0, 80) } : preset)
     setCustomLlmPresets(next)
-    const { saveCustomLlmPresets } = await import("@/lib/project-store")
+    const { saveCustomLlmPresets } = await import("@/lib/utils/project-store")
     await saveCustomLlmPresets(next)
   }
 
@@ -163,7 +163,7 @@ export function LlmProviderSection() {
     setCustomLlmPresets(nextPresets)
     setProviderConfigs(nextConfigs)
     setTaskModelRouting(nextRouting)
-    const { saveCustomLlmPresets, saveProviderConfigs, saveTaskModelRouting } = await import("@/lib/project-store")
+    const { saveCustomLlmPresets, saveProviderConfigs, saveTaskModelRouting } = await import("@/lib/utils/project-store")
     await Promise.all([
       saveCustomLlmPresets(nextPresets),
       saveProviderConfigs(nextConfigs),

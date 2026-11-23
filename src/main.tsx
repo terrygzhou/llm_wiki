@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./index.css";
 import "@/i18n";
-import { loadAndApplyTheme, watchSystemTheme } from "@/lib/theme";
+import { loadAndApplyTheme, watchSystemTheme } from "@/lib/utils/theme";
 import { AppDialogHost } from "@/components/app-dialog-host";
 
 function applyPlatformClass() {

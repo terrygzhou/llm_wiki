@@ -11,7 +11,7 @@ import {
   isProjectManagedScheduledImportPath,
   resolveImportPath,
   scanAndImport,
-} from "@/lib/scheduled-import"
+} from "@/lib/utils/scheduled-import"
 
 interface Props {
   draft: SettingsDraft

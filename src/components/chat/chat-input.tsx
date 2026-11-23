@@ -3,9 +3,9 @@ import { BrainCircuit, ChevronDown, FileSearch, FileText, Globe2, ImagePlus, Sen
 import { useTranslation } from "react-i18next"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { isImeComposing } from "@/lib/keyboard-utils"
+import { isImeComposing } from "@/lib/utils/keyboard-utils"
 import type { MessageImage } from "@/stores/chat-store"
-import type { ChatAgentMode, ChatRetrievalMode } from "@/lib/chat-agent-types"
+import type { ChatAgentMode, ChatRetrievalMode } from "@/lib/chat/chat-agent-types"
 import {
   MAX_IMAGE_BYTES,
   MAX_IMAGE_MB,
@@ -13,7 +13,7 @@ import {
   fileToMessageImage,
   isAcceptedImageType,
   messageImageToDataUrl,
-} from "@/lib/chat-image-utils"
+} from "@/lib/chat/chat-image-utils"
 
 export interface ChatSendOptions {
   useWebSearch: boolean

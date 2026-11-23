@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { AlertTriangle } from "lucide-react"
-import { validateProxyUrl } from "@/lib/proxy-config"
+import { validateProxyUrl } from "@/lib/chat/proxy-config"
 import type { SettingsDraft, DraftSetter } from "../settings-types"
 
 interface Props {

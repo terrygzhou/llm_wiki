@@ -5,7 +5,7 @@ import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
 import type { SettingsDraft, DraftSetter } from "../settings-types"
 import type { MineruLocalBackend, MineruModelVersion, MineruParseMethod } from "@/stores/wiki-store"
-import { testMineruConnection } from "@/lib/mineru"
+import { testMineruConnection } from "@/lib/ingest/mineru"
 
 interface Props {
   draft: SettingsDraft

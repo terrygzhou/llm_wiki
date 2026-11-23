@@ -4,10 +4,10 @@ import { useTranslation } from "react-i18next"
 import { openUrl } from "@tauri-apps/plugin-opener"
 import { apiServerStatus, clipServerStatus } from "@/commands/fs"
 import { Button } from "@/components/ui/button"
-import { API_SERVER_HEALTH_URL, API_SERVER_PORT } from "@/lib/api-server-constants"
+import { API_SERVER_HEALTH_URL, API_SERVER_PORT } from "@/lib/utils/api-server-constants"
 import { useUpdateStore, hasAvailableUpdate } from "@/stores/update-store"
-import { checkForUpdates, toLatestReleaseUrl } from "@/lib/update-check"
-import { saveUpdateCheckState } from "@/lib/project-store"
+import { checkForUpdates, toLatestReleaseUrl } from "@/lib/utils/update-check"
+import { saveUpdateCheckState } from "@/lib/utils/project-store"
 import { useAppDialog } from "@/stores/app-dialog-store"
 
 interface ApiHealth {

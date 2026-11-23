@@ -10,10 +10,10 @@ import { listDirectory, openPathInProject, readFile } from "@/commands/fs"
 import type { FileNode } from "@/types/wiki"
 import { useTranslation } from "react-i18next"
 import { useAppDialog } from "@/stores/app-dialog-store"
-import { normalizePath } from "@/lib/path-utils"
-import { decideDeleteClick } from "@/lib/sources-tree-delete"
-import { rescanProjectFileSync } from "@/lib/project-file-sync"
-import { sortFileNodes } from "@/lib/file-tree-order"
+import { normalizePath } from "@/lib/utils/path-utils"
+import { decideDeleteClick } from "@/lib/utils/sources-tree-delete"
+import { rescanProjectFileSync } from "@/lib/tauri/project-file-sync"
+import { sortFileNodes } from "@/lib/utils/file-tree-order"
 import {
   deleteSourceFile,
   deleteSourceFolder,
@@ -22,13 +22,13 @@ import {
   importSourceFolder,
   type SkippedSourceImport,
   type SourceImportResult,
-} from "@/lib/source-lifecycle"
-import { filterRawSourceTree } from "@/lib/source-filter"
-import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
+} from "@/lib/utils/source-lifecycle"
+import { filterRawSourceTree } from "@/lib/utils/source-filter"
+import { refreshProjectFileTree } from "@/lib/tauri/project-file-tree-refresh"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { importSourceUrls, parseImportUrls, type UrlImportResult } from "@/lib/url-source-import"
-import { listIngestedSourceIdentities } from "@/lib/ingest-cache"
-import { getQueue, type IngestTask } from "@/lib/ingest-queue"
+import { importSourceUrls, parseImportUrls, type UrlImportResult } from "@/lib/utils/url-source-import"
+import { listIngestedSourceIdentities } from "@/lib/ingest/ingest-cache"
+import { getQueue, type IngestTask } from "@/lib/ingest/ingest-queue"
 
 const SOURCE_TREE_INITIAL_ROWS = 160
 const SOURCE_TREE_LOAD_BATCH = 160

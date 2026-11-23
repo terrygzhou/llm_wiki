@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { FolderOpen, Plus, Clock, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { getRecentProjects, removeFromRecentProjects } from "@/lib/project-store"
+import { getRecentProjects, removeFromRecentProjects } from "@/lib/utils/project-store"
 import type { WikiProject } from "@/types/wiki"
 import { useTranslation } from "react-i18next"
 

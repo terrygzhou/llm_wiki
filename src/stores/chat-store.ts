@@ -1,7 +1,7 @@
 import { create } from "zustand"
-import type { ChatMessage, ContentBlock } from "@/lib/llm-client"
+import type { ChatMessage, ContentBlock } from "@/lib/chat/llm-client"
 import i18n from "@/i18n"
-import type { ChatAgentFileChange, ChatAgentMode, ChatAgentStep, ChatRetrievalMode, ChatUserInputRequest } from "@/lib/chat-agent-types"
+import type { ChatAgentFileChange, ChatAgentMode, ChatAgentStep, ChatRetrievalMode, ChatUserInputRequest } from "@/lib/chat/chat-agent-types"
 
 /**
  * An image attached to a user message. Field names mirror the

@@ -1,6 +1,6 @@
 import path from "path"
 import { readFileSync } from "fs"
-import { defineConfig } from "vite"
+import { defineConfig } from "vitest/config"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 
@@ -26,6 +26,16 @@ export default defineConfig(async () => ({
   //
   // 1. prevent vite from obscuring rust errors
   clearScreen: false,
+
+  // `vite preview` (serving the production `dist/` build) — bind to all
+  // interfaces so the app is reachable from the machine's hostname, LAN IP,
+  // and localhost.
+  preview: {
+    host: true,
+    port: 4173,
+    strictPort: true,
+  },
+
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
     port: 1420,

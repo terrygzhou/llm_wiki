@@ -9,11 +9,11 @@ import { useLintStore } from "@/stores/lint-store"
 import { useChatStore } from "@/stores/chat-store"
 import { BASE_FONT_SIZE_PX, useZoomStore } from "@/stores/zoom-store"
 import { openProject } from "@/commands/fs"
-import { getLastProject, getRecentProjects, saveLastProject, loadLlmConfig, loadLanguage, loadSearchApiConfig, loadEmbeddingConfig, loadMineruConfig, loadMultimodalConfig, loadOutputLanguage, loadProviderConfigs, loadCustomLlmPresets, loadActivePresetId, loadTaskModelRouting, loadProjectLlmOverride, loadProxyConfig, loadScheduledImportConfig, saveScheduledImportConfig, loadSourceWatchAllProjects, loadSourceWatchConfig, loadApiConfig, loadGeneralConfig, loadZoomLevel } from "@/lib/project-store"
-import { loadReviewItems, loadLintItems, loadChatHistory, loadChatPreferences } from "@/lib/persist"
-import { setupAutoSave } from "@/lib/auto-save"
-import { startClipWatcher } from "@/lib/clip-watcher"
-import { DEFAULT_SOURCE_WATCH_CONFIG } from "@/lib/source-watch-config"
+import { getLastProject, getRecentProjects, saveLastProject, loadLlmConfig, loadLanguage, loadSearchApiConfig, loadEmbeddingConfig, loadMineruConfig, loadMultimodalConfig, loadOutputLanguage, loadProviderConfigs, loadCustomLlmPresets, loadActivePresetId, loadTaskModelRouting, loadProjectLlmOverride, loadProxyConfig, loadScheduledImportConfig, saveScheduledImportConfig, loadSourceWatchAllProjects, loadSourceWatchConfig, loadApiConfig, loadGeneralConfig, loadZoomLevel } from "@/lib/utils/project-store"
+import { loadReviewItems, loadLintItems, loadChatHistory, loadChatPreferences } from "@/lib/tauri/persist"
+import { setupAutoSave } from "@/lib/utils/auto-save"
+import { startClipWatcher } from "@/lib/ingest/clip-watcher"
+import { DEFAULT_SOURCE_WATCH_CONFIG } from "@/lib/tauri/source-watch-config"
 import { useGlobalShortcut } from "@/hooks/use-global-shortcut"
 import { AppLayout } from "@/components/layout/app-layout"
 import { WelcomeScreen } from "@/components/project/welcome-screen"
@@ -127,7 +127,7 @@ function App() {
 
       const scheduledImportConfig = useWikiStore.getState().scheduledImportConfig
       if (!isCurrentProject(proj)) return
-      const { startScheduledImport } = await import("@/lib/scheduled-import")
+      const { startScheduledImport } = await import("@/lib/utils/scheduled-import")
       if (!isCurrentProject(proj)) return
       // Start the global sweep even when this project's own schedule is off;
       // recently opened projects may still have active folder monitors.
@@ -225,11 +225,11 @@ function App() {
       if (cancelled) return
       try {
         const { loadUpdateCheckState, saveUpdateCheckState } = await import(
-          "@/lib/project-store"
+          "@/lib/utils/project-store"
         )
         const { useUpdateStore } = await import("@/stores/update-store")
         const { checkForUpdates, UPDATE_CHECK_CACHE_MS } = await import(
-          "@/lib/update-check"
+          "@/lib/utils/update-check"
         )
 
         const persisted = await loadUpdateCheckState()
@@ -340,7 +340,7 @@ function App() {
             const resolved = resolveConfig(preset, override, currentFallback)
             useWikiStore.getState().setLlmConfig(resolved)
             useWikiStore.getState().setGlobalLlmConfig(resolved)
-            const { saveLlmConfig } = await import("@/lib/project-store")
+            const { saveLlmConfig } = await import("@/lib/utils/project-store")
             await saveLlmConfig(resolved)
           }
         }
@@ -435,19 +435,19 @@ function App() {
     // auto-save before reset empties the stores — otherwise the debounced
     // writers would persist empty arrays back over the old project's pending
     // review / deep-research items.
-    const { runWithSuspendedAutoSave } = await import("@/lib/auto-save")
+    const { runWithSuspendedAutoSave } = await import("@/lib/utils/auto-save")
     await runWithSuspendedAutoSave(async () => {
       // Clear all per-project state BEFORE loading new project data
       // to prevent cross-project contamination. MUST be awaited so the
       // ingest queue / graph cache are actually cleared before the new
       // project's state is populated.
-      const { resetProjectState } = await import("@/lib/reset-project-state")
+      const { resetProjectState } = await import("@/lib/utils/reset-project-state")
       await resetProjectState()
 
       setProject(proj)
       const projectLlmOverride = await loadProjectLlmOverride(proj.id)
       const llmState = useWikiStore.getState()
-      const { resolveProjectLlmConfig } = await import("@/lib/llm-task-routing")
+      const { resolveProjectLlmConfig } = await import("@/lib/chat/llm-task-routing")
       llmState.setProjectLlmOverride(projectLlmOverride)
       llmState.setLlmConfig(resolveProjectLlmConfig(
         llmState.globalLlmConfig,
@@ -472,7 +472,7 @@ function App() {
 
       // Apply the project-specific worker limit before restoring its queue so
       // newly enqueued tasks never start with another project's concurrency.
-      const { setIngestWorkerLimit } = await import("@/lib/ingest-queue")
+      const { setIngestWorkerLimit } = await import("@/lib/ingest/ingest-queue")
       try {
         const config = await loadSourceWatchConfig(proj.id)
         if (!isCurrentProject(proj)) return
@@ -491,19 +491,19 @@ function App() {
       // Await this before starting file sync: watcher events for raw/sources
       // may enqueue ingest tasks and require an active project queue.
       try {
-        const { restoreQueue } = await import("@/lib/ingest-queue")
+        const { restoreQueue } = await import("@/lib/ingest/ingest-queue")
         await restoreQueue(proj.id, proj.path)
       } catch (err) {
         console.error("Failed to restore ingest queue:", err)
       }
       // Same handshake for the dedup-merge queue.
-      import("@/lib/dedup-queue").then(({ restoreQueue }) => {
+      import("@/lib/ingest/dedup-queue").then(({ restoreQueue }) => {
         restoreQueue(proj.id, proj.path).catch((err) =>
           console.error("Failed to restore dedup queue:", err)
         )
       })
       // Start project source watch if enabled
-      import("@/lib/project-file-sync").then(async ({
+      import("@/lib/tauri/project-file-sync").then(async ({
         startAllProjectFileSync,
         startProjectFileSync,
         stopAllProjectFileSync,
@@ -614,11 +614,11 @@ function App() {
   }
 
   async function handleSwitchProject() {
-    import("@/lib/project-file-sync").then(({ stopAllProjectFileSync }) => {
+    import("@/lib/tauri/project-file-sync").then(({ stopAllProjectFileSync }) => {
       stopAllProjectFileSync()
     }).catch(() => {})
     // Stop scheduled import before switching projects
-    import("@/lib/scheduled-import").then(({ stopScheduledImport }) => {
+    import("@/lib/utils/scheduled-import").then(({ stopScheduledImport }) => {
       stopScheduledImport()
     }).catch(() => {})
 
@@ -632,12 +632,12 @@ function App() {
     // Flush outgoing project's review/lint/chat to disk and suspend auto-save
     // before reset empties the stores. resumeAutoSave() runs when the next
     // project opens via handleProjectOpened.
-    const { flushAndSuspendAutoSave } = await import("@/lib/auto-save")
+    const { flushAndSuspendAutoSave } = await import("@/lib/utils/auto-save")
     await flushAndSuspendAutoSave()
 
     // Clear all per-project state BEFORE flipping back to the welcome screen
     // so old data cannot leak in via any async render pass.
-    const { resetProjectState } = await import("@/lib/reset-project-state")
+    const { resetProjectState } = await import("@/lib/utils/reset-project-state")
     await resetProjectState()
     setProject(null)
     setFileTree([])

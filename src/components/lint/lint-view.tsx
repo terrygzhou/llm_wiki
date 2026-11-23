@@ -17,16 +17,16 @@ import { Button } from "@/components/ui/button"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useReviewStore } from "@/stores/review-store"
 import { useLintStore, type LintItem } from "@/stores/lint-store"
-import { runStructuralLint, runSemanticLint } from "@/lib/lint"
-import { hasUsableLlm } from "@/lib/has-usable-llm"
+import { runStructuralLint, runSemanticLint } from "@/lib/utils/lint"
+import { hasUsableLlm } from "@/lib/chat/has-usable-llm"
 import { readFile, writeFile } from "@/commands/fs"
-import { normalizePath } from "@/lib/path-utils"
-import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
+import { normalizePath } from "@/lib/utils/path-utils"
+import { refreshProjectFileTree } from "@/lib/tauri/project-file-tree-refresh"
 import {
   appendWikilink,
   ensureBrokenLinkStub,
   rewriteWikilinkTarget,
-} from "@/lib/lint-fixes"
+} from "@/lib/utils/lint-fixes"
 import { useTranslation } from "react-i18next"
 import { useAppDialog } from "@/stores/app-dialog-store"
 import {
@@ -34,7 +34,7 @@ import {
   loadLintConfig,
   saveLintConfig,
   type LintConfig,
-} from "@/lib/lint-config"
+} from "@/lib/utils/lint-config"
 
 export function groupLintResultsForDisplay(results: readonly LintItem[]): {
   warnings: LintItem[]
@@ -341,7 +341,7 @@ export function LintView() {
       // and index.md entries can still point at it — the orphan
       // detector only walks body refs.
       const { cascadeDeleteWikiPagesWithRefs } = await import(
-        "@/lib/wiki-page-delete"
+        "@/lib/utils/wiki-page-delete"
       )
       await cascadeDeleteWikiPagesWithRefs(pp, [pagePath])
       useLintStore.getState().removeItem(item.id)

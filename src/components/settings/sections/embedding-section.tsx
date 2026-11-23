@@ -13,10 +13,10 @@ import {
   getEmbeddingReindexState,
   legacyVectorRowCount,
   subscribeEmbeddingReindexState,
-} from "@/lib/embedding"
-import { testEmbeddingConnection, testEmbeddingFunction, type ProviderTestResult } from "@/lib/connection-tests"
+} from "@/lib/embed/embedding"
+import { testEmbeddingConnection, testEmbeddingFunction, type ProviderTestResult } from "@/lib/chat/connection-tests"
 import type { SettingsDraft, DraftSetter } from "../settings-types"
-import { MAX_USER_CONCURRENCY, clampUserConcurrency } from "@/lib/concurrency-limits"
+import { MAX_USER_CONCURRENCY, clampUserConcurrency } from "@/lib/chat/concurrency-limits"
 
 interface Props {
   draft: SettingsDraft

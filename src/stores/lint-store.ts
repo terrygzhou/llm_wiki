@@ -1,5 +1,5 @@
 import { create } from "zustand"
-import type { LintResult } from "@/lib/lint"
+import type { LintResult } from "@/lib/utils/lint"
 
 export interface LintItem {
   id: string

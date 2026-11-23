@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react"
-import { queueResearch, queueResearchBatch } from "@/lib/deep-research"
+import { queueResearch, queueResearchBatch } from "@/lib/utils/deep-research"
 import {
   AlertTriangle,
   Copy,
@@ -16,16 +16,16 @@ import { Button } from "@/components/ui/button"
 import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { writeFile, readFile, deleteFile, fileExists } from "@/commands/fs"
-import { normalizePath } from "@/lib/path-utils"
-import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
-import { hasConfiguredDeepResearchSources } from "@/lib/web-search"
-import { makeQueryFileName } from "@/lib/wiki-filename"
-import { availableReviewPageFileName, createReviewPageDrafts } from "@/lib/review-create-page"
-import { cleanAssistantContentForWikiSave, titleFromCleanAssistantContent } from "@/lib/chat-save-to-wiki"
+import { normalizePath } from "@/lib/utils/path-utils"
+import { refreshProjectFileTree } from "@/lib/tauri/project-file-tree-refresh"
+import { hasConfiguredDeepResearchSources } from "@/lib/utils/web-search"
+import { makeQueryFileName } from "@/lib/utils/wiki-filename"
+import { availableReviewPageFileName, createReviewPageDrafts } from "@/lib/utils/review-create-page"
+import { cleanAssistantContentForWikiSave, titleFromCleanAssistantContent } from "@/lib/chat/chat-save-to-wiki"
 import { useTranslation } from "react-i18next"
 import { useAppDialog } from "@/stores/app-dialog-store"
 import { useResearchStore } from "@/stores/research-store"
-import { reviewResearchQueries, reviewResearchTopic, selectedResearchReviews } from "@/lib/review-batch-research"
+import { reviewResearchQueries, reviewResearchTopic, selectedResearchReviews } from "@/lib/utils/review-batch-research"
 
 const typeConfig: Record<ReviewItem["type"], { icon: typeof AlertTriangle; color: string }> = {
   contradiction: { icon: AlertTriangle, color: "text-amber-500" },
@@ -76,7 +76,7 @@ export function ReviewView() {
     if (!project || refreshing) return
     setRefreshing(true)
     try {
-      const { loadReviewItems } = await import("@/lib/persist")
+      const { loadReviewItems } = await import("@/lib/tauri/persist")
       const loaded = await loadReviewItems(project.path)
       setItems(loaded)
       setSelectedReviewIds(new Set())

@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next"
 import { Label } from "@/components/ui/label"
 import { Plus, Minus } from "lucide-react"
 import type { SettingsDraft, DraftSetter } from "../settings-types"
-import type { AppTheme } from "@/lib/theme"
+import type { AppTheme } from "@/lib/utils/theme"
 import { useState, useEffect } from "react"
 import { MAX_ZOOM_LEVEL, MIN_ZOOM_LEVEL, ZOOM_STEP, clampZoomLevel, roundZoomLevel } from "@/stores/zoom-store"
 

@@ -2,12 +2,12 @@ import { useState, useCallback, useMemo, useEffect } from "react"
 import { Search, FileText, ImageIcon, X, ArrowUpRight } from "lucide-react"
 import { useWikiStore } from "@/stores/wiki-store"
 import { readFile } from "@/commands/fs"
-import { searchWiki, tokenizeQuery, type SearchResult, type ImageRef } from "@/lib/search"
+import { searchWiki, tokenizeQuery, type SearchResult, type ImageRef } from "@/lib/utils/search"
 import { useTranslation } from "react-i18next"
-import { normalizePath } from "@/lib/path-utils"
-import { resolveMarkdownImageSrc } from "@/lib/markdown-image-resolver"
-import { findRawSourceForImage, imageUrlToAbsolute } from "@/lib/raw-source-resolver"
-import { isImeComposing } from "@/lib/keyboard-utils"
+import { normalizePath } from "@/lib/utils/path-utils"
+import { resolveMarkdownImageSrc } from "@/lib/utils/markdown-image-resolver"
+import { findRawSourceForImage, imageUrlToAbsolute } from "@/lib/utils/raw-source-resolver"
+import { isImeComposing } from "@/lib/utils/keyboard-utils"
 
 /**
  * One image hit displayed in the Images section.

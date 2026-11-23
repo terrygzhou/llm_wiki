@@ -29,14 +29,14 @@ import {
   getCodeLanguage,
   getFileExtension,
   isExtractedTextPreviewFile,
-} from "@/lib/file-types"
-import type { FileCategory } from "@/lib/file-types"
-import { getFileName, normalizePath } from "@/lib/path-utils"
-import { resolveMarkdownImageSrc } from "@/lib/markdown-image-resolver"
-import { transformImageEmbeds } from "@/lib/wikilink-transform"
-import { detectLanguage } from "@/lib/detect-language"
-import { getHtmlLang, getTextDirection } from "@/lib/language-metadata"
-import { parseFrontmatter } from "@/lib/frontmatter"
+} from "@/lib/utils/file-types"
+import type { FileCategory } from "@/lib/utils/file-types"
+import { getFileName, normalizePath } from "@/lib/utils/path-utils"
+import { resolveMarkdownImageSrc } from "@/lib/utils/markdown-image-resolver"
+import { transformImageEmbeds } from "@/lib/ingest/wikilink-transform"
+import { detectLanguage } from "@/lib/i18n-support/detect-language"
+import { getHtmlLang, getTextDirection } from "@/lib/i18n-support/language-metadata"
+import { parseFrontmatter } from "@/lib/utils/frontmatter"
 import { FrontmatterPanel } from "@/components/editor/frontmatter-panel"
 import { useWikiStore } from "@/stores/wiki-store"
 import { MermaidDiagram, unwrapMermaidPre } from "@/components/mermaid-diagram"

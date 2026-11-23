@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core"
 import type { SourceWatchConfig } from "@/stores/wiki-store"
-import { normalizeSourceWatchConfig } from "@/lib/source-watch-config"
+import { normalizeSourceWatchConfig } from "@/lib/tauri/source-watch-config"
 
 export type FileChangeKind = "created" | "modified" | "deleted"
 export type FileChangeStatus = "pending" | "processing" | "done" | "failed" | "superseded"

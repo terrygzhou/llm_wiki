@@ -1,5 +1,5 @@
 import { create } from "zustand"
-import type { WebSearchResult } from "@/lib/web-search"
+import type { WebSearchResult } from "@/lib/utils/web-search"
 
 export interface ResearchTask {
   id: string
